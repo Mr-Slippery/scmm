@@ -51,12 +51,7 @@ impl CaptureWriter {
             .as_nanos() as u64;
 
         // Write placeholder header (will be updated on finalize)
-        let header_bytes = unsafe {
-            std::slice::from_raw_parts(
-                &header as *const _ as *const u8,
-                std::mem::size_of::<CaptureFileHeader>(),
-            )
-        };
+        let header_bytes = unsafe { scmm_common::struct_to_bytes(&header) };
         file.write_all(header_bytes)?;
         file.flush()?; // Ensure header is written immediately
 
@@ -191,7 +186,7 @@ impl CaptureWriter {
         }
 
         // Write block header
-        let block_type: u32 = 1; // SYSCALL_EVENTS
+        let block_type: u32 = scmm_common::capture::block_type::SYSCALL_EVENTS;
         let compressed_size: u32 = 0; // Not compressed for now
         let uncompressed_size: u32 = self.event_buffer.len() as u32;
 
@@ -229,7 +224,7 @@ impl CaptureWriter {
         let metadata_offset = self.position;
         let metadata_json = serde_json::to_vec(&self.metadata)?;
 
-        let block_type: u32 = 3; // METADATA
+        let block_type: u32 = scmm_common::capture::block_type::METADATA;
         self.file.write_u32::<LittleEndian>(block_type)?;
         self.file.write_u32::<LittleEndian>(0)?; // compressed size
         self.file.write_u32::<LittleEndian>(metadata_json.len() as u32)?;
@@ -253,12 +248,7 @@ impl CaptureWriter {
         use std::io::{Seek, SeekFrom};
         file.seek(SeekFrom::Start(0))?;
 
-        let header_bytes = unsafe {
-            std::slice::from_raw_parts(
-                &self.header as *const _ as *const u8,
-                std::mem::size_of::<CaptureFileHeader>(),
-            )
-        };
+        let header_bytes = unsafe { scmm_common::struct_to_bytes(&self.header) };
         file.write_all(header_bytes)?;
         file.flush()?;
 

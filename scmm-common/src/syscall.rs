@@ -247,30 +247,3 @@ pub mod ring_event_type {
     pub const PROCESS_EXIT: u8 = 4;
 }
 
-/// Socket address data (parsed from struct sockaddr)
-#[repr(C)]
-#[derive(Clone, Debug)]
-pub struct SockaddrInfo {
-    /// Address family (AF_INET, AF_INET6, AF_UNIX, etc.)
-    pub family: u16,
-    /// Port number (for INET/INET6)
-    pub port: u16,
-    /// IPv4 address bytes
-    pub ipv4: [u8; 4],
-    /// IPv6 address bytes
-    pub ipv6: [u8; 16],
-    /// Unix socket path (not serialized due to size)
-    pub unix_path: [u8; 108],
-}
-
-impl Default for SockaddrInfo {
-    fn default() -> Self {
-        Self {
-            family: 0,
-            port: 0,
-            ipv4: [0; 4],
-            ipv6: [0; 16],
-            unix_path: [0; 108],
-        }
-    }
-}

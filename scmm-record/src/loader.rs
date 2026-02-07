@@ -194,8 +194,9 @@ impl Recorder {
 
     /// Add a PID to the tracking map
     fn add_pid(&mut self, pid: u32) -> Result<()> {
-        let mut target_pids: AyaHashMap<_, u32, u8> =
-            AyaHashMap::try_from(self.bpf.map_mut("TARGET_PIDS").unwrap())?;
+        let map = self.bpf.map_mut("TARGET_PIDS")
+            .ok_or_else(|| anyhow::anyhow!("TARGET_PIDS map not found"))?;
+        let mut target_pids: AyaHashMap<_, u32, u8> = AyaHashMap::try_from(map)?;
         target_pids.insert(pid, 1, 0)?;
         debug!("Added PID {} to tracking", pid);
         Ok(())
@@ -321,6 +322,18 @@ impl Recorder {
 
             if self.event_count % 10000 == 0 {
                 trace!("Processed {} events", self.event_count);
+
+                // Prune stale pending entries: remove entries whose timestamp
+                // is more than 5 seconds older than the current event. These
+                // are orphaned SYSCALL_ENTRY events whose matching EXIT was
+                // lost (e.g. process killed mid-syscall, ring buffer overflow).
+                let cutoff_ns = event.timestamp_ns.saturating_sub(5_000_000_000);
+                let before = self.pending_entries.len();
+                self.pending_entries.retain(|_, e| e.timestamp_ns >= cutoff_ns);
+                let pruned = before - self.pending_entries.len();
+                if pruned > 0 {
+                    debug!("Pruned {} stale pending entries", pruned);
+                }
             }
         }
 

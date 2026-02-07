@@ -1,7 +1,5 @@
 //! Code generation for compiled policies
 
-use std::collections::HashMap;
-
 use anyhow::Result;
 use byteorder::{LittleEndian, WriteBytesExt};
 
@@ -64,12 +62,7 @@ pub fn compile(policy: &YamlPolicy, target_arch: &str) -> Result<Vec<u8>> {
     header.path_table_len = path_table.len() as u32;
 
     // Write header
-    let header_bytes = unsafe {
-        std::slice::from_raw_parts(
-            &header as *const _ as *const u8,
-            std::mem::size_of::<CompiledPolicyHeader>(),
-        )
-    };
+    let header_bytes = unsafe { scmm_common::struct_to_bytes(&header) };
     output.extend_from_slice(header_bytes);
 
     // Write seccomp filter
@@ -131,7 +124,7 @@ fn generate_seccomp_filter(policy: &YamlPolicy, arch_id: u32) -> Result<Vec<u8>>
     let mut deny_syscalls: Vec<u32> = Vec::new();
 
     // Map syscall names to numbers (x86_64)
-    let syscall_map = build_syscall_map();
+    let syscall_map = syscalls::build_name_to_nr_map();
 
     // Always allow bootstrap/enforcement syscalls.
     // The recorder captures syscalls after exec, so some are never in the trace
@@ -215,24 +208,7 @@ fn generate_landlock_rules(policy: &YamlPolicy) -> Result<Vec<u8>> {
         // Access rights bitmap
         let mut access: u64 = 0;
         for a in &rule.access {
-            access |= match a.as_str() {
-                "execute" => 1 << 0,
-                "write_file" => 1 << 1,
-                "read_file" => 1 << 2,
-                "read_dir" => 1 << 3,
-                "remove_dir" => 1 << 4,
-                "remove_file" => 1 << 5,
-                "make_char" => 1 << 6,
-                "make_dir" => 1 << 7,
-                "make_reg" => 1 << 8,
-                "make_sock" => 1 << 9,
-                "make_fifo" => 1 << 10,
-                "make_block" => 1 << 11,
-                "make_sym" => 1 << 12,
-                "refer" => 1 << 13,
-                "truncate" => 1 << 14,
-                _ => 0,
-            };
+            access |= scmm_common::policy::landlock_access::name_to_bit(a);
         }
         output.write_u64::<LittleEndian>(access)?;
 
@@ -265,17 +241,3 @@ fn generate_path_table(policy: &YamlPolicy) -> Result<Vec<u8>> {
     Ok(output)
 }
 
-/// Build syscall name to number map from the complete table in scmm-common
-fn build_syscall_map() -> HashMap<&'static str, u32> {
-    let mut map = HashMap::new();
-
-    // Iterate over all valid syscall numbers (x86_64: 0-334, 424-461)
-    for nr in (0..=334).chain(424..=461) {
-        let name = syscalls::get_name(nr);
-        if name != "unknown" {
-            map.insert(name, nr);
-        }
-    }
-
-    map
-}

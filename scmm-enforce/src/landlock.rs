@@ -124,50 +124,25 @@ fn add_path_rule(
 fn bitmap_to_access_fs(bitmap: u64) -> BitFlags<AccessFs> {
     let mut access = BitFlags::<AccessFs>::empty();
 
-    if bitmap & (1 << 0) != 0 {
-        access |= AccessFs::Execute;
-    }
-    if bitmap & (1 << 1) != 0 {
-        access |= AccessFs::WriteFile;
-    }
-    if bitmap & (1 << 2) != 0 {
-        access |= AccessFs::ReadFile;
-    }
-    if bitmap & (1 << 3) != 0 {
-        access |= AccessFs::ReadDir;
-    }
-    if bitmap & (1 << 4) != 0 {
-        access |= AccessFs::RemoveDir;
-    }
-    if bitmap & (1 << 5) != 0 {
-        access |= AccessFs::RemoveFile;
-    }
-    if bitmap & (1 << 6) != 0 {
-        access |= AccessFs::MakeChar;
-    }
-    if bitmap & (1 << 7) != 0 {
-        access |= AccessFs::MakeDir;
-    }
-    if bitmap & (1 << 8) != 0 {
-        access |= AccessFs::MakeReg;
-    }
-    if bitmap & (1 << 9) != 0 {
-        access |= AccessFs::MakeSock;
-    }
-    if bitmap & (1 << 10) != 0 {
-        access |= AccessFs::MakeFifo;
-    }
-    if bitmap & (1 << 11) != 0 {
-        access |= AccessFs::MakeBlock;
-    }
-    if bitmap & (1 << 12) != 0 {
-        access |= AccessFs::MakeSym;
-    }
-    if bitmap & (1 << 13) != 0 {
-        access |= AccessFs::Refer;
-    }
-    if bitmap & (1 << 14) != 0 {
-        access |= AccessFs::Truncate;
+    for name in scmm_common::policy::landlock_access::bitmap_to_names(bitmap) {
+        access |= match name {
+            "execute" => AccessFs::Execute,
+            "write_file" => AccessFs::WriteFile,
+            "read_file" => AccessFs::ReadFile,
+            "read_dir" => AccessFs::ReadDir,
+            "remove_dir" => AccessFs::RemoveDir,
+            "remove_file" => AccessFs::RemoveFile,
+            "make_char" => AccessFs::MakeChar,
+            "make_dir" => AccessFs::MakeDir,
+            "make_reg" => AccessFs::MakeReg,
+            "make_sock" => AccessFs::MakeSock,
+            "make_fifo" => AccessFs::MakeFifo,
+            "make_block" => AccessFs::MakeBlock,
+            "make_sym" => AccessFs::MakeSym,
+            "refer" => AccessFs::Refer,
+            "truncate" => AccessFs::Truncate,
+            _ => continue,
+        };
     }
 
     if access.is_empty() {

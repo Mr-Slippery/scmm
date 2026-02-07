@@ -15,8 +15,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use tracing::{info, warn, Level};
-use tracing_subscriber::FmtSubscriber;
+use tracing::{info, warn};
 
 mod codegen;
 mod validator;
@@ -55,20 +54,7 @@ struct Args {
 fn main() -> ExitCode {
     let args = Args::parse();
 
-    // Set up logging
-    let level = match args.verbose {
-        0 => Level::WARN,
-        1 => Level::INFO,
-        2 => Level::DEBUG,
-        _ => Level::TRACE,
-    };
-
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(level)
-        .with_target(false)
-        .finish();
-
-    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+    scmm_common::init_tracing(args.verbose);
 
     match run(args) {
         Ok(()) => ExitCode::SUCCESS,

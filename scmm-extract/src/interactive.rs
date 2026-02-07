@@ -657,7 +657,7 @@ fn process_file_paths(policy: &mut YamlPolicy, file_accesses: &[FileAccessInfo])
 
 /// Extract network connections from capture
 fn extract_network_connections(_capture: &ParsedCapture) -> Vec<(String, u16, String)> {
-    // Placeholder - would need proper sockaddr parsing
+    // TODO: implement when sockaddr parsing is added to eBPF capture
     Vec::new()
 }
 

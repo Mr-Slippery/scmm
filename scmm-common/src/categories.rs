@@ -666,4 +666,17 @@ pub mod x86_64 {
             _ => "unknown",
         }
     }
+
+    /// Build a map from syscall name to syscall number (x86_64).
+    pub fn build_name_to_nr_map() -> std::collections::HashMap<&'static str, u32> {
+        let mut map = std::collections::HashMap::new();
+        // x86_64 syscall numbers: 0-334, 424-461
+        for nr in (0..=334).chain(424..=461) {
+            let name = get_name(nr);
+            if name != "unknown" {
+                map.insert(name, nr);
+            }
+        }
+        map
+    }
 }

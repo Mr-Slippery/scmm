@@ -7,7 +7,6 @@ description = "SysCallMeMaybe eBPF programs (kernel-space)"
 
 [dependencies]
 aya-ebpf = "0.1"
-aya-log-ebpf = "0.1"
 scmm-common = { path = "../scmm-common", default-features = false, features = ["no_std"] }
 
 [[bin]]

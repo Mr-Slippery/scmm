@@ -35,3 +35,44 @@ pub const CAPTURE_VERSION: u16 = 1;
 
 /// Current format version for policy files
 pub const POLICY_VERSION: u16 = 1;
+
+/// Initialize tracing/logging with the given verbosity level.
+/// 0 = WARN, 1 = INFO, 2 = DEBUG, 3+ = TRACE.
+#[cfg(not(feature = "no_std"))]
+pub fn init_tracing(verbose: u8) {
+    use tracing::Level;
+    use tracing_subscriber::FmtSubscriber;
+
+    let level = match verbose {
+        0 => Level::WARN,
+        1 => Level::INFO,
+        2 => Level::DEBUG,
+        _ => Level::TRACE,
+    };
+
+    let subscriber = FmtSubscriber::builder()
+        .with_max_level(level)
+        .with_target(false)
+        .finish();
+
+    tracing::subscriber::set_global_default(subscriber)
+        .expect("setting default subscriber failed");
+}
+
+/// Convert a `#[repr(C)]` struct to a byte slice (for writing to files).
+///
+/// # Safety
+/// The caller must ensure `T` is `#[repr(C)]` or `#[repr(C, packed)]` and
+/// contains no padding with uninitialized bytes that would be UB to read.
+pub unsafe fn struct_to_bytes<T: Copy>(val: &T) -> &[u8] {
+    core::slice::from_raw_parts(val as *const T as *const u8, core::mem::size_of::<T>())
+}
+
+/// Read a `#[repr(C)]` struct from a byte slice.
+///
+/// # Safety
+/// The caller must ensure `bytes` contains a valid representation of `T`
+/// and is at least `size_of::<T>()` bytes long.
+pub unsafe fn bytes_to_struct<T: Copy>(bytes: &[u8]) -> T {
+    core::ptr::read(bytes.as_ptr() as *const T)
+}

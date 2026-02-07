@@ -32,7 +32,7 @@ pub fn parse_capture(path: &Path) -> Result<ParsedCapture> {
     let mut header_bytes = [0u8; std::mem::size_of::<CaptureFileHeader>()];
     reader.read_exact(&mut header_bytes)?;
 
-    let header: CaptureFileHeader = unsafe { std::ptr::read(header_bytes.as_ptr() as *const _) };
+    let header: CaptureFileHeader = unsafe { scmm_common::bytes_to_struct(&header_bytes) };
 
     // Verify magic
     if &header.magic != CAPTURE_MAGIC {
@@ -60,8 +60,7 @@ pub fn parse_capture(path: &Path) -> Result<ParsedCapture> {
         let _last_timestamp = reader.read_u64::<LittleEndian>()?;
 
         match block_type {
-            1 => {
-                // SYSCALL_EVENTS
+            scmm_common::capture::block_type::SYSCALL_EVENTS => {
                 let mut data = vec![0u8; uncompressed_size as usize];
                 reader.read_exact(&mut data)?;
 
@@ -72,8 +71,8 @@ pub fn parse_capture(path: &Path) -> Result<ParsedCapture> {
                     events.push(event);
                 }
             }
-            3 => {
-                // METADATA - skip for now, read at end
+            scmm_common::capture::block_type::METADATA => {
+                // Skip for now, read at end
                 let mut data = vec![0u8; uncompressed_size as usize];
                 reader.read_exact(&mut data)?;
             }

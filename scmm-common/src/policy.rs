@@ -281,4 +281,33 @@ pub mod landlock_access {
     pub const MAKE_SYM: &str = "make_sym";
     pub const REFER: &str = "refer";
     pub const TRUNCATE: &str = "truncate";
+
+    /// All access rights in bitmap order (bit 0 = execute, bit 1 = write_file, etc.)
+    const ALL_RIGHTS: &[&str] = &[
+        EXECUTE, WRITE_FILE, READ_FILE, READ_DIR, REMOVE_DIR, REMOVE_FILE,
+        MAKE_CHAR, MAKE_DIR, MAKE_REG, MAKE_SOCK, MAKE_FIFO, MAKE_BLOCK,
+        MAKE_SYM, REFER, TRUNCATE,
+    ];
+
+    /// Convert an access right name to its bitmap bit value.
+    /// Returns 0 for unknown names.
+    pub fn name_to_bit(name: &str) -> u64 {
+        for (i, &right) in ALL_RIGHTS.iter().enumerate() {
+            if name == right {
+                return 1 << i;
+            }
+        }
+        0
+    }
+
+    /// Convert a bitmap to a list of access right names.
+    pub fn bitmap_to_names(bitmap: u64) -> Vec<&'static str> {
+        let mut names = Vec::new();
+        for (i, &right) in ALL_RIGHTS.iter().enumerate() {
+            if bitmap & (1 << i) != 0 {
+                names.push(right);
+            }
+        }
+        names
+    }
 }

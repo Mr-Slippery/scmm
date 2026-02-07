@@ -17,4 +17,5 @@ serde = { workspace = true, optional = true }
 
 [target.'cfg(not(target_arch = "bpf"))'.dependencies]
 serde = { workspace = true }
-thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

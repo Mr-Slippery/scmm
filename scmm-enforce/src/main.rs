@@ -15,8 +15,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
-use tracing::{info, warn, Level};
-use tracing_subscriber::FmtSubscriber;
+use tracing::{info, warn};
 
 mod landlock;
 mod loader;
@@ -32,8 +31,6 @@ pub enum EnforcementMode {
     Strict,
     /// Seccomp only, maximum compatibility
     Seccomp,
-    /// Log violations but don't block (for testing)
-    Permissive,
 }
 
 /// SysCallMeMaybe (SCMM) - Syscall enforcer
@@ -69,20 +66,7 @@ struct Args {
 fn main() -> ExitCode {
     let args = Args::parse();
 
-    // Set up logging
-    let level = match args.verbose {
-        0 => Level::WARN,
-        1 => Level::INFO,
-        2 => Level::DEBUG,
-        _ => Level::TRACE,
-    };
-
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(level)
-        .with_target(false)
-        .finish();
-
-    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+    scmm_common::init_tracing(args.verbose);
 
     match run(args) {
         Ok(code) => code,
@@ -142,10 +126,6 @@ fn run(args: Args) -> Result<ExitCode> {
         EnforcementMode::Seccomp => {
             apply_seccomp(&policy)?;
         }
-        EnforcementMode::Permissive => {
-            info!("Permissive mode - logging violations only");
-            apply_seccomp_log_only(&policy)?;
-        }
     }
 
     // Execute the command
@@ -197,14 +177,6 @@ fn apply_seccomp(policy: &loader::LoadedPolicy) -> Result<()> {
 
     seccomp::apply_filter(&policy.seccomp_filter)?;
     info!("Seccomp filter applied");
-    Ok(())
-}
-
-/// Apply seccomp in log-only mode
-fn apply_seccomp_log_only(_policy: &loader::LoadedPolicy) -> Result<()> {
-    // In log-only mode, we use SECCOMP_RET_LOG instead of KILL/ERRNO
-    // This requires modifying the filter or using a different approach
-    info!("Log-only mode - violations will be logged but not blocked");
     Ok(())
 }
 

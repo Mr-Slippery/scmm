@@ -16,14 +16,6 @@ static EVENTS: RingBuf = RingBuf::with_byte_size(1024 * 1024, 0);
 #[map]
 static TARGET_PIDS: HashMap<u32, u8> = HashMap::with_max_entries(1024, 0);
 
-/// Category filter bitmask (set by userspace)
-#[map]
-static CATEGORY_FILTER: HashMap<u32, u32> = HashMap::with_max_entries(1, 0);
-
-/// Follow child processes flag
-#[map]
-static FOLLOW_FORKS: HashMap<u32, u8> = HashMap::with_max_entries(1, 0);
-
 /// Returns the argument index (0-5) that contains a path pointer for this syscall,
 /// or 255 if no path argument. x86_64 syscall numbers.
 #[inline(always)]

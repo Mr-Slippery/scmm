@@ -110,24 +110,6 @@ pub struct ProcessInfo {
     pub exit_code: Option<i32>,
 }
 
-/// Block header for event blocks in the capture file
-#[repr(C, packed)]
-#[derive(Clone, Copy, Debug, Default)]
-pub struct EventBlockHeader {
-    /// Block type identifier
-    pub block_type: u32,
-    /// Compressed size (0 if uncompressed)
-    pub compressed_size: u32,
-    /// Uncompressed size
-    pub uncompressed_size: u32,
-    /// Number of events in this block
-    pub event_count: u32,
-    /// First event timestamp (for seeking)
-    pub first_timestamp: u64,
-    /// Last event timestamp
-    pub last_timestamp: u64,
-}
-
 /// Block types
 pub mod block_type {
     /// Syscall events
@@ -140,26 +122,3 @@ pub mod block_type {
     pub const INDEX: u32 = 4;
 }
 
-/// Serialized syscall event in capture file
-/// This is a more compact representation than the ring buffer event
-#[repr(C, packed)]
-#[derive(Clone, Copy, Debug)]
-pub struct SerializedEvent {
-    /// Delta from previous timestamp (varint in actual file)
-    pub timestamp_delta: u32,
-    /// Event flags
-    pub flags: u16,
-    /// Syscall number
-    pub syscall_nr: u16,
-    /// Process ID
-    pub pid: u32,
-    /// Thread ID
-    pub tid: u32,
-    /// Return value
-    pub ret_val: i64,
-    /// Number of arguments with data
-    pub arg_count: u8,
-    /// Reserved
-    pub _reserved: [u8; 7],
-    // Followed by variable-length argument data
-}

@@ -38,7 +38,7 @@ pub fn load_policy(path: &Path) -> Result<LoadedPolicy> {
     let mut header_bytes = [0u8; std::mem::size_of::<CompiledPolicyHeader>()];
     file.read_exact(&mut header_bytes)?;
 
-    let header: CompiledPolicyHeader = unsafe { std::ptr::read(header_bytes.as_ptr() as *const _) };
+    let header: CompiledPolicyHeader = unsafe { scmm_common::bytes_to_struct(&header_bytes) };
 
     // Verify magic
     if &header.magic != POLICY_MAGIC {
