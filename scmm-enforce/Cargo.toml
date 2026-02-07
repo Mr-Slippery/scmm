@@ -1,0 +1,22 @@
+[package]
+name = "scmm-enforce"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SysCallMeMaybe enforcer - launches programs with syscall policies"
+
+[dependencies]
+scmm-common = { path = "../scmm-common" }
+anyhow.workspace = true
+thiserror.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+byteorder.workspace = true
+landlock.workspace = true
+libc = "0.2"
+nix = { version = "0.28", features = ["process", "signal"] }
+
+[[bin]]
+name = "scmm-enforce"
+path = "src/main.rs"

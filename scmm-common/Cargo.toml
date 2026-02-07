@@ -1,0 +1,20 @@
+[package]
+name = "scmm-common"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared types for SysCallMeMaybe (SCMM)"
+
+[features]
+default = ["std"]
+std = []
+# no_std mode for eBPF programs
+no_std = []
+
+[dependencies]
+# Only include serde when building for userspace (std)
+serde = { workspace = true, optional = true }
+
+[target.'cfg(not(target_arch = "bpf"))'.dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }

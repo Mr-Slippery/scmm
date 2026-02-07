@@ -1,0 +1,23 @@
+[package]
+name = "scmm-ebpf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SysCallMeMaybe eBPF programs (kernel-space)"
+
+[dependencies]
+aya-ebpf = "0.1"
+aya-log-ebpf = "0.1"
+scmm-common = { path = "../scmm-common", default-features = false, features = ["no_std"] }
+
+[[bin]]
+name = "scmm-ebpf"
+path = "src/main.rs"
+
+[profile.dev]
+panic = "abort"
+opt-level = 2
+
+[profile.release]
+panic = "abort"
+lto = true

@@ -1,0 +1,22 @@
+[package]
+name = "scmm-compile"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SysCallMeMaybe policy compiler - converts YAML to binary format"
+
+[dependencies]
+scmm-common = { path = "../scmm-common" }
+anyhow.workspace = true
+thiserror.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde.workspace = true
+serde_yaml.workspace = true
+bincode.workspace = true
+byteorder.workspace = true
+
+[[bin]]
+name = "scmm-compile"
+path = "src/main.rs"

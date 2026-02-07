@@ -1,0 +1,7 @@
+# Build artifacts
+/target/
+
+# Capture and policy files
+*.scmm-cap
+*.scmm-pol
+*policy*.yaml
