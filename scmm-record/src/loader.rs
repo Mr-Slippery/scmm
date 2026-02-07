@@ -342,8 +342,19 @@ impl Recorder {
         if let Some(entry) = entry {
             for (i, &arg) in entry.args.iter().enumerate() {
                 event.args[i].raw_value = arg;
-                // TODO: Determine arg types based on syscall number
                 event.args[i].arg_type = scmm_common::ArgType::Integer;
+            }
+
+            // Copy captured path string data
+            if entry.path_arg_index != 255 && entry.path_str_len > 0 {
+                let idx = entry.path_arg_index as usize;
+                if idx < scmm_common::MAX_ARGS {
+                    let len = (entry.path_str_len as usize).min(scmm_common::MAX_ARG_STR_LEN);
+                    event.args[idx].arg_type = scmm_common::ArgType::Path;
+                    event.args[idx].str_data[..len]
+                        .copy_from_slice(&entry.path_data[..len]);
+                    event.args[idx].str_len = len as u16;
+                }
             }
         }
 

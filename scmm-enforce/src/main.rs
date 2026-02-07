@@ -116,7 +116,10 @@ fn run(args: Args) -> Result<ExitCode> {
     // Set NO_NEW_PRIVS before applying seccomp (required by kernel)
     set_no_new_privs()?;
 
-    // Apply enforcement based on mode
+    // Apply enforcement based on mode.
+    // Landlock must be applied BEFORE seccomp because the Landlock syscalls
+    // (landlock_create_ruleset, landlock_add_rule, landlock_restrict_self)
+    // would be blocked by the seccomp filter.
     match args.mode {
         EnforcementMode::Strict => {
             if !caps.landlock {
@@ -124,17 +127,17 @@ fn run(args: Args) -> Result<ExitCode> {
                     "Landlock not available. Strict mode requires kernel 5.13+ with Landlock enabled."
                 );
             }
-            apply_seccomp(&policy)?;
             landlock::apply(&policy)?;
+            apply_seccomp(&policy)?;
         }
         EnforcementMode::Standard => {
-            apply_seccomp(&policy)?;
             if caps.landlock {
                 landlock::apply(&policy)?;
             } else {
                 warn!("Landlock not available - path-based restrictions will not be enforced");
                 warn!("Consider upgrading to kernel 5.13+ for full protection");
             }
+            apply_seccomp(&policy)?;
         }
         EnforcementMode::Seccomp => {
             apply_seccomp(&policy)?;

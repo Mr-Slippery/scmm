@@ -133,14 +133,18 @@ fn generate_seccomp_filter(policy: &YamlPolicy, arch_id: u32) -> Result<Vec<u8>>
     // Map syscall names to numbers (x86_64)
     let syscall_map = build_syscall_map();
 
-    // Always allow bootstrap syscalls that any process needs to start/stop.
-    // The recorder captures syscalls after exec, so execve/exit_group are
-    // never in the trace, but the enforcer needs execve to launch the target.
+    // Always allow bootstrap/enforcement syscalls.
+    // The recorder captures syscalls after exec, so some are never in the trace
+    // but the enforcer needs them to launch the target and apply Landlock.
     let bootstrap_syscalls: &[u32] = &[
         59,  // execve
         322, // execveat
         231, // exit_group
         60,  // exit
+        157, // prctl (needed for PR_SET_NO_NEW_PRIVS)
+        444, // landlock_create_ruleset
+        445, // landlock_add_rule
+        446, // landlock_restrict_self
     ];
     for &nr in bootstrap_syscalls {
         allow_set.insert(nr);

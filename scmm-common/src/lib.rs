@@ -18,8 +18,8 @@ pub use categories::*;
 /// Maximum path length we capture from syscall arguments
 pub const MAX_PATH_LEN: usize = 256;
 
-/// Maximum string argument length
-pub const MAX_ARG_STR_LEN: usize = 128;
+/// Maximum string argument length (matches MAX_PATH_LEN for full path capture)
+pub const MAX_ARG_STR_LEN: usize = 256;
 
 /// Maximum number of syscall arguments
 pub const MAX_ARGS: usize = 6;

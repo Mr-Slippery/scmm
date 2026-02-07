@@ -151,6 +151,36 @@ impl CaptureWriter {
                 .write_u64::<LittleEndian>(arg.raw_value)?;
         }
 
+        // Argument string data (variable length)
+        let mut arg_info_count: u8 = 0;
+        for arg in &event.args {
+            if arg.str_len > 0
+                && matches!(
+                    arg.arg_type,
+                    scmm_common::ArgType::Path | scmm_common::ArgType::String
+                )
+            {
+                arg_info_count += 1;
+            }
+        }
+        self.event_buffer.write_u8(arg_info_count)?;
+
+        for (i, arg) in event.args.iter().enumerate() {
+            if arg.str_len > 0
+                && matches!(
+                    arg.arg_type,
+                    scmm_common::ArgType::Path | scmm_common::ArgType::String
+                )
+            {
+                self.event_buffer.write_u8(i as u8)?;
+                self.event_buffer.write_u8(arg.arg_type as u8)?;
+                self.event_buffer
+                    .write_u16::<LittleEndian>(arg.str_len)?;
+                self.event_buffer
+                    .write_all(&arg.str_data[..arg.str_len as usize])?;
+            }
+        }
+
         Ok(())
     }
 

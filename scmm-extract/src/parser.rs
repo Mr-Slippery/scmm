@@ -9,9 +9,9 @@ use anyhow::{bail, Context, Result};
 use byteorder::{LittleEndian, ReadBytesExt};
 
 use scmm_common::{
-    capture::{CaptureFileHeader, CaptureMetadata},
+    capture::{capture_flags, CaptureFileHeader, CaptureMetadata},
     categories::x86_64 as syscalls,
-    SyscallCategory, SyscallEvent, CAPTURE_MAGIC,
+    SyscallCategory, SyscallEvent, CAPTURE_MAGIC, MAX_ARGS, MAX_ARG_STR_LEN,
 };
 
 /// Parsed capture file
@@ -39,6 +39,9 @@ pub fn parse_capture(path: &Path) -> Result<ParsedCapture> {
         bail!("Invalid capture file: bad magic number");
     }
 
+    // Check if capture has argument string data
+    let has_arg_strings = (header.flags & capture_flags::HAS_ARG_STRINGS) != 0;
+
     // Read events
     let mut events = Vec::new();
     let mut prev_timestamp = 0u64;
@@ -65,7 +68,7 @@ pub fn parse_capture(path: &Path) -> Result<ParsedCapture> {
                 // Parse events from data
                 let mut cursor = std::io::Cursor::new(&data);
                 for _ in 0..event_count {
-                    let event = parse_event(&mut cursor, &mut prev_timestamp)?;
+                    let event = parse_event(&mut cursor, &mut prev_timestamp, has_arg_strings)?;
                     events.push(event);
                 }
             }
@@ -113,7 +116,11 @@ pub fn parse_capture(path: &Path) -> Result<ParsedCapture> {
 }
 
 /// Parse a single event from the data buffer
-fn parse_event(cursor: &mut std::io::Cursor<&Vec<u8>>, prev_timestamp: &mut u64) -> Result<SyscallEvent> {
+fn parse_event(
+    cursor: &mut std::io::Cursor<&Vec<u8>>,
+    prev_timestamp: &mut u64,
+    has_arg_strings: bool,
+) -> Result<SyscallEvent> {
     let mut event = SyscallEvent::default();
 
     // Timestamp delta
@@ -139,6 +146,30 @@ fn parse_event(cursor: &mut std::io::Cursor<&Vec<u8>>, prev_timestamp: &mut u64)
     // Arguments
     for arg in &mut event.args {
         arg.raw_value = cursor.read_u64::<LittleEndian>()?;
+    }
+
+    // Read argument string data if present
+    if has_arg_strings {
+        let arg_info_count = cursor.read_u8()?;
+        for _ in 0..arg_info_count {
+            let arg_index = cursor.read_u8()? as usize;
+            let arg_type_byte = cursor.read_u8()?;
+            let str_len = cursor.read_u16::<LittleEndian>()? as usize;
+
+            if arg_index < MAX_ARGS && str_len <= MAX_ARG_STR_LEN {
+                event.args[arg_index].arg_type = match arg_type_byte {
+                    3 => scmm_common::ArgType::String,
+                    4 => scmm_common::ArgType::Path,
+                    _ => scmm_common::ArgType::Unknown,
+                };
+                event.args[arg_index].str_len = str_len as u16;
+                cursor.read_exact(&mut event.args[arg_index].str_data[..str_len])?;
+            } else {
+                // Skip invalid/oversized data
+                let mut skip_buf = vec![0u8; str_len];
+                cursor.read_exact(&mut skip_buf)?;
+            }
+        }
     }
 
     Ok(event)
@@ -188,4 +219,30 @@ pub fn print_statistics(capture: &ParsedCapture) {
     // Unique PIDs
     let unique_pids: std::collections::HashSet<_> = capture.events.iter().map(|e| e.pid).collect();
     println!("Unique PIDs: {}", unique_pids.len());
+    println!();
+
+    // File paths
+    let mut path_counts: HashMap<String, usize> = HashMap::new();
+    for event in &capture.events {
+        for arg in &event.args {
+            if arg.arg_type == scmm_common::ArgType::Path && arg.str_len > 0 {
+                if let Ok(path_str) = std::str::from_utf8(&arg.str_data[..arg.str_len as usize]) {
+                    *path_counts.entry(path_str.to_string()).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+    if !path_counts.is_empty() {
+        println!("Captured file paths: {} unique", path_counts.len());
+        let mut sorted_paths: Vec<_> = path_counts.iter().collect();
+        sorted_paths.sort_by(|a, b| b.1.cmp(a.1));
+        for (path, count) in sorted_paths.iter().take(20) {
+            println!("  {} ({})", path, count);
+        }
+        if sorted_paths.len() > 20 {
+            println!("  ... and {} more", sorted_paths.len() - 20);
+        }
+    } else {
+        println!("No file paths captured.");
+    }
 }

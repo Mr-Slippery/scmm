@@ -1,6 +1,6 @@
 //! Syscall event definitions shared between eBPF and userspace
 
-use crate::{MAX_ARG_STR_LEN, MAX_ARGS};
+use crate::{MAX_ARG_STR_LEN, MAX_ARGS, MAX_PATH_LEN};
 
 #[cfg(not(feature = "no_std"))]
 use serde::{Deserialize, Serialize};
@@ -176,7 +176,7 @@ pub mod event_flags {
 /// Lightweight event for ring buffer (minimal size for eBPF)
 /// This is what gets sent from kernel to userspace
 #[repr(C)]
-#[derive(Clone, Debug, Default)]
+#[derive(Clone)]
 pub struct RingBufEvent {
     /// Event type (entry/exit)
     pub event_type: u8,
@@ -194,6 +194,49 @@ pub struct RingBufEvent {
     pub ret_val: i64,
     /// Raw argument values
     pub args: [u64; MAX_ARGS],
+    /// Which argument index contains a captured path string (255 = none)
+    pub path_arg_index: u8,
+    /// Padding for alignment
+    pub _pad2: u8,
+    /// Length of the captured path string (0 = no string)
+    pub path_str_len: u16,
+    /// Path string data (only valid up to path_str_len bytes)
+    pub path_data: [u8; MAX_PATH_LEN],
+}
+
+impl Default for RingBufEvent {
+    fn default() -> Self {
+        Self {
+            event_type: 0,
+            _pad: [0; 3],
+            syscall_nr: 0,
+            timestamp_ns: 0,
+            pid: 0,
+            tid: 0,
+            ret_val: 0,
+            args: [0u64; MAX_ARGS],
+            path_arg_index: 255,
+            _pad2: 0,
+            path_str_len: 0,
+            path_data: [0u8; MAX_PATH_LEN],
+        }
+    }
+}
+
+impl core::fmt::Debug for RingBufEvent {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("RingBufEvent")
+            .field("event_type", &self.event_type)
+            .field("syscall_nr", &self.syscall_nr)
+            .field("timestamp_ns", &self.timestamp_ns)
+            .field("pid", &self.pid)
+            .field("tid", &self.tid)
+            .field("ret_val", &self.ret_val)
+            .field("args", &self.args)
+            .field("path_arg_index", &self.path_arg_index)
+            .field("path_str_len", &self.path_str_len)
+            .finish()
+    }
 }
 
 /// Ring buffer event types

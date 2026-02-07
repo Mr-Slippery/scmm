@@ -17,7 +17,6 @@ use clap::Parser;
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 
-mod generalize;
 mod interactive;
 mod parser;
 mod yaml;

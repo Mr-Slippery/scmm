@@ -1,6 +1,7 @@
 //! Interactive CLI for policy extraction
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::path::Path;
 
 use anyhow::Result;
 use console::style;
@@ -9,13 +10,12 @@ use dialoguer::{Input, Select};
 use scmm_common::{
     categories::x86_64 as syscalls,
     policy::{
-        Action, FilesystemRule, FilesystemRules, NetworkRule,
+        landlock_access, Action, FilesystemRule, FilesystemRules, NetworkRule,
         NetworkRules, PolicyMetadata, PolicySettings, SyscallRule, YamlPolicy,
     },
-    SyscallCategory,
+    ArgType, SyscallCategory,
 };
 
-use crate::generalize::PathGeneralizer;
 use crate::parser::ParsedCapture;
 
 /// Run interactive extraction
@@ -82,9 +82,9 @@ pub fn run_interactive_extraction(capture: &ParsedCapture, policy_name: &str) ->
     println!();
     println!("{}", style("Analyzing file accesses...").bold());
 
-    let file_paths = extract_file_paths(capture);
-    if !file_paths.is_empty() {
-        process_file_paths(&mut policy, &file_paths)?;
+    let file_accesses = extract_file_paths(capture);
+    if !file_accesses.is_empty() {
+        process_file_paths(&mut policy, &file_accesses)?;
     } else {
         println!("No file paths found in capture.");
     }
@@ -241,119 +241,415 @@ fn process_syscalls(
     Ok(())
 }
 
-/// Extract file paths from capture
-fn extract_file_paths(_capture: &ParsedCapture) -> Vec<String> {
-    // For now, return placeholder since we don't capture paths in the basic version
-    // In a full implementation, this would parse the captured argument strings
-    Vec::new()
+/// Info about a unique file path observed in the capture
+struct FileAccessInfo {
+    /// The resolved absolute path
+    path: String,
+    /// Syscall names that accessed this path
+    syscall_names: Vec<String>,
+    /// Total number of accesses
+    count: usize,
 }
 
-/// Process file paths interactively
-fn process_file_paths(policy: &mut YamlPolicy, paths: &[String]) -> Result<()> {
-    let generalizer = PathGeneralizer::new();
-    let suggestions = generalizer.analyze(paths);
+/// Normalize a path by resolving `.` and `..` components without touching the filesystem.
+fn normalize_path(path: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for component in path.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => { parts.pop(); }
+            other => parts.push(other),
+        }
+    }
+    if path.starts_with('/') {
+        format!("/{}", parts.join("/"))
+    } else {
+        parts.join("/")
+    }
+}
 
-    println!("Found {} unique file paths", paths.len());
+/// Extract file paths from capture events
+fn extract_file_paths(capture: &ParsedCapture) -> Vec<FileAccessInfo> {
+    // Collect (path, syscall_nr) -> count
+    let mut path_map: HashMap<(String, u32), usize> = HashMap::new();
+
+    let working_dir = &capture.metadata.working_dir;
+
+    for event in &capture.events {
+        for arg in &event.args {
+            if arg.arg_type == ArgType::Path && arg.str_len > 0 {
+                if let Ok(path_str) = std::str::from_utf8(&arg.str_data[..arg.str_len as usize]) {
+                    // Resolve relative paths against working directory
+                    let resolved = if path_str.starts_with('/') {
+                        path_str.to_string()
+                    } else if !working_dir.is_empty() {
+                        format!("{}/{}", working_dir, path_str)
+                    } else {
+                        path_str.to_string()
+                    };
+
+                    // Normalize . and .. components
+                    let normalized = normalize_path(&resolved);
+
+                    // Filter out pseudo-paths
+                    if normalized.starts_with("/proc/self/fd/")
+                        || normalized.starts_with("/dev/fd/")
+                    {
+                        continue;
+                    }
+
+                    *path_map.entry((normalized, event.syscall_nr)).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+
+    // Group by path
+    let mut by_path: HashMap<String, (Vec<String>, usize)> = HashMap::new();
+    for ((path, nr), count) in path_map {
+        let entry = by_path.entry(path).or_insert_with(|| (Vec::new(), 0));
+        let name = syscalls::get_name(nr).to_string();
+        if !entry.0.contains(&name) {
+            entry.0.push(name);
+        }
+        entry.1 += count;
+    }
+
+    let mut results: Vec<FileAccessInfo> = by_path
+        .into_iter()
+        .map(|(path, (syscall_names, count))| FileAccessInfo {
+            path,
+            syscall_names,
+            count,
+        })
+        .collect();
+
+    results.sort_by(|a, b| a.path.cmp(&b.path));
+    results
+}
+
+/// Build ancestor subtree choices for a path.
+/// E.g. "/var/www/index.html" produces:
+///   /var/www/index.html (exact file)
+///   /var/www/**
+///   /var/**
+///   /**
+///   Custom pattern...
+///   Skip
+fn build_subtree_choices(path: &str) -> Vec<(String, String)> {
+    let mut choices = Vec::new();
+
+    // First option: exact path
+    choices.push((path.to_string(), path.to_string()));
+
+    // Build ancestor subtrees from most specific to least
+    let path_obj = Path::new(path);
+    for ancestor in path_obj.ancestors().skip(1) {
+        let ancestor_str = ancestor.to_string_lossy();
+        if ancestor_str == "/" {
+            choices.push(("/**".to_string(), "/**".to_string()));
+        } else if !ancestor_str.is_empty() {
+            choices.push((
+                format!("{}/**", ancestor_str),
+                format!("{}/**", ancestor_str),
+            ));
+        }
+    }
+
+    choices.push(("Custom pattern...".to_string(), "CUSTOM".to_string()));
+    choices.push(("Skip".to_string(), "SKIP".to_string()));
+
+    choices
+}
+
+/// Infer Landlock access rights from observed syscall names.
+/// If `is_directory_rule` is true (e.g. pattern ends with `/**`), also grant
+/// read_dir and execute so directory traversal works.
+fn infer_access_rights(syscall_names: &[String], is_directory_rule: bool) -> Vec<String> {
+    let mut rights = std::collections::HashSet::new();
+
+    for name in syscall_names {
+        match name.as_str() {
+            "open" | "openat" | "openat2" => {
+                rights.insert(landlock_access::READ_FILE);
+            }
+            "stat" | "lstat" | "newfstatat" | "statx" | "statfs"
+            | "access" | "faccessat" | "faccessat2" => {
+                rights.insert(landlock_access::READ_FILE);
+            }
+            "readlink" | "readlinkat" => {
+                rights.insert(landlock_access::READ_FILE);
+            }
+            "unlink" | "unlinkat" => {
+                rights.insert(landlock_access::REMOVE_FILE);
+            }
+            "rmdir" => {
+                rights.insert(landlock_access::REMOVE_DIR);
+            }
+            "mkdir" | "mkdirat" => {
+                rights.insert(landlock_access::MAKE_DIR);
+            }
+            "creat" => {
+                rights.insert(landlock_access::WRITE_FILE);
+                rights.insert(landlock_access::MAKE_REG);
+            }
+            "rename" | "renameat" | "renameat2" => {
+                rights.insert(landlock_access::REFER);
+            }
+            "chmod" | "fchmodat" | "chown" | "lchown" | "fchownat" => {
+                rights.insert(landlock_access::WRITE_FILE);
+            }
+            "truncate" => {
+                rights.insert(landlock_access::TRUNCATE);
+            }
+            "execve" | "execveat" => {
+                rights.insert(landlock_access::EXECUTE);
+            }
+            "link" | "linkat" | "symlink" | "symlinkat" => {
+                rights.insert(landlock_access::MAKE_SYM);
+                rights.insert(landlock_access::REFER);
+            }
+            "chdir" | "chroot" => {
+                rights.insert(landlock_access::READ_DIR);
+            }
+            _ => {
+                rights.insert(landlock_access::READ_FILE);
+            }
+        }
+    }
+
+    // Directory rules (glob patterns like /foo/**) need read_dir and execute
+    // so that the kernel allows traversal into the directory hierarchy.
+    if is_directory_rule {
+        rights.insert(landlock_access::READ_DIR);
+        rights.insert(landlock_access::EXECUTE);
+    }
+
+    let mut result: Vec<String> = rights.into_iter().map(|s| s.to_string()).collect();
+    result.sort();
+    result
+}
+
+/// Check if a path is already covered by a previously chosen glob pattern
+fn is_covered_by_patterns(path: &str, patterns: &[String]) -> bool {
+    for pattern in patterns {
+        if pattern.ends_with("/**") {
+            let prefix = &pattern[..pattern.len() - 3];
+            if path.starts_with(prefix) {
+                return true;
+            }
+        } else if pattern == path {
+            return true;
+        }
+    }
+    false
+}
+
+/// Group file accesses by their topmost directory (e.g. /etc, /usr, /home, etc.)
+fn group_by_top_dir(file_accesses: &[FileAccessInfo]) -> Vec<(String, Vec<&FileAccessInfo>)> {
+    let mut groups: HashMap<String, Vec<&FileAccessInfo>> = HashMap::new();
+
+    for info in file_accesses {
+        // Find top-level directory (first component after root)
+        let top = match Path::new(&info.path).components().nth(1) {
+            Some(c) => format!("/{}", c.as_os_str().to_string_lossy()),
+            None => "/".to_string(), // path is "/" itself
+        };
+        groups.entry(top).or_default().push(info);
+    }
+
+    let mut result: Vec<(String, Vec<&FileAccessInfo>)> = groups.into_iter().collect();
+    result.sort_by(|a, b| a.0.cmp(&b.0));
+    result
+}
+
+/// Collect all access rights from a group of file accesses
+fn collect_group_rights(group: &[&FileAccessInfo], is_directory_rule: bool) -> Vec<String> {
+    let all_syscalls: Vec<String> = group
+        .iter()
+        .flat_map(|info| info.syscall_names.iter().cloned())
+        .collect();
+    infer_access_rights(&all_syscalls, is_directory_rule)
+}
+
+/// Process file paths interactively with per-path subtree choices
+fn process_file_paths(policy: &mut YamlPolicy, file_accesses: &[FileAccessInfo]) -> Result<()> {
+    println!(
+        "Found {} unique file paths",
+        file_accesses.len()
+    );
     println!();
 
-    // Group paths by directory for display
-    let mut processed = HashSet::new();
+    // First show a summary of all paths so the user has context
+    println!("{}", style("All captured file paths:").bold());
+    for info in file_accesses {
+        let syscall_list = info.syscall_names.join(", ");
+        println!(
+            "  {} ({}, {}x)",
+            info.path,
+            style(&syscall_list).dim(),
+            info.count,
+        );
+    }
+    println!();
 
-    for suggestion in suggestions {
-        if suggestion.confidence < 0.5 {
+    // Group paths by top-level directory for a more efficient UX
+    let groups = group_by_top_dir(file_accesses);
+
+    // Track chosen patterns to skip already-covered paths
+    let mut chosen_patterns: Vec<String> = Vec::new();
+
+    for (top_dir, group) in &groups {
+        // Check if already covered by a broader pattern
+        if is_covered_by_patterns(top_dir, &chosen_patterns) {
+            println!(
+                "  {} {}",
+                style(format!("{}/ ({} paths)", top_dir, group.len())).dim(),
+                style("(already covered)").dim()
+            );
             continue;
         }
 
-        println!("{}", style(&suggestion.reason).yellow());
-        println!("Paths:");
-        for path in suggestion.original_paths.iter().take(5) {
-            println!("  - {}", path);
+        println!(
+            "{}",
+            style(format!("Directory: {} ({} paths)", top_dir, group.len())).bold().cyan()
+        );
+
+        // Show all paths in this group
+        for info in group {
+            let syscall_list = info.syscall_names.join(", ");
+            println!(
+                "    {} ({}, {}x)",
+                info.path,
+                style(&syscall_list).dim(),
+                info.count,
+            );
         }
-        if suggestion.original_paths.len() > 5 {
-            println!("  ... and {} more", suggestion.original_paths.len() - 5);
-        }
 
-        let (pattern_str, _) = suggestion.pattern.to_yaml_pattern();
+        // If there's only one path and it equals the top dir (i.e. "/"), or
+        // the group has many paths, offer group-level choices first
+        if group.len() > 1 {
+            // Offer a group-level choice first
+            let group_choices = if top_dir == "/" {
+                vec![
+                    ("Allow access to all listed root-level paths individually".to_string(), "INDIVIDUAL"),
+                    ("Allow access to everything under /** (full filesystem)".to_string(), "GLOB"),
+                    ("Custom pattern...".to_string(), "CUSTOM"),
+                    ("Skip all".to_string(), "SKIP"),
+                ]
+            } else {
+                vec![
+                    ("Review each path individually".to_string(), "INDIVIDUAL"),
+                    (format!("Allow access to everything under {}/**", top_dir), "GLOB"),
+                    ("Custom pattern...".to_string(), "CUSTOM"),
+                    ("Skip all".to_string(), "SKIP"),
+                ]
+            };
 
-        let choices = vec![
-            format!("Use pattern: {}", pattern_str),
-            "Keep as exact paths".to_string(),
-            "Enter custom pattern".to_string(),
-            "Skip these paths".to_string(),
-        ];
+            let display_items: Vec<&str> = group_choices.iter().map(|(label, _)| label.as_str()).collect();
 
-        let selection = Select::new()
-            .with_prompt("How should these paths be handled?")
-            .items(&choices)
-            .default(0)
-            .interact()?;
+            let selection = Select::new()
+                .with_prompt("How to handle this group?")
+                .items(&display_items)
+                .default(0)
+                .interact()?;
 
-        match selection {
-            0 => {
-                // Use suggested pattern
-                policy.filesystem.rules.push(FilesystemRule {
-                    path: pattern_str,
-                    access: vec!["read_file".to_string()],
-                });
-                for path in &suggestion.original_paths {
-                    processed.insert(path.clone());
-                }
-            }
-            1 => {
-                // Exact paths
-                for path in &suggestion.original_paths {
+            let action = group_choices[selection].1;
+
+            match action {
+                "GLOB" => {
+                    let pattern = if top_dir == "/" {
+                        "/**".to_string()
+                    } else {
+                        format!("{}/**", top_dir)
+                    };
+                    let access = collect_group_rights(group, true);
                     policy.filesystem.rules.push(FilesystemRule {
-                        path: path.clone(),
-                        access: vec!["read_file".to_string()],
+                        path: pattern.clone(),
+                        access,
                     });
-                    processed.insert(path.clone());
+                    chosen_patterns.push(pattern);
+                    println!();
+                    continue;
+                }
+                "CUSTOM" => {
+                    let custom: String = Input::new()
+                        .with_prompt("Enter pattern (use * for wildcard, ** for recursive)")
+                        .interact_text()?;
+                    let is_dir = custom.contains("**") || custom.ends_with("/*");
+                    let access = collect_group_rights(group, is_dir);
+                    policy.filesystem.rules.push(FilesystemRule {
+                        path: custom.clone(),
+                        access,
+                    });
+                    chosen_patterns.push(custom);
+                    println!();
+                    continue;
+                }
+                "SKIP" => {
+                    println!();
+                    continue;
+                }
+                _ => {
+                    // Fall through to individual path processing
                 }
             }
-            2 => {
-                // Custom pattern
+        }
+
+        // Process individual paths in this group
+        for info in group {
+            if is_covered_by_patterns(&info.path, &chosen_patterns) {
+                println!(
+                    "    {} {}",
+                    style(&info.path).dim(),
+                    style("(already covered)").dim()
+                );
+                continue;
+            }
+
+            let syscall_list = info.syscall_names.join(", ");
+            println!(
+                "  {} ({}, {}x)",
+                style(&info.path).bold(),
+                style(&syscall_list).dim(),
+                info.count,
+            );
+
+            let choices = build_subtree_choices(&info.path);
+            let display_items: Vec<&str> = choices.iter().map(|(label, _)| label.as_str()).collect();
+
+            let selection = Select::new()
+                .with_prompt("Choose access scope")
+                .items(&display_items)
+                .default(0)
+                .interact()?;
+
+            let (_, ref pattern) = choices[selection];
+
+            if pattern == "SKIP" {
+                continue;
+            }
+
+            let final_pattern = if pattern == "CUSTOM" {
                 let custom: String = Input::new()
                     .with_prompt("Enter pattern (use * for wildcard, ** for recursive)")
                     .interact_text()?;
-                policy.filesystem.rules.push(FilesystemRule {
-                    path: custom,
-                    access: vec!["read_file".to_string()],
-                });
-                for path in &suggestion.original_paths {
-                    processed.insert(path.clone());
-                }
-            }
-            _ => {} // Skip
+                custom
+            } else {
+                pattern.clone()
+            };
+
+            let is_dir = final_pattern.contains("**") || final_pattern.ends_with("/*");
+            let access = infer_access_rights(&info.syscall_names, is_dir);
+
+            policy.filesystem.rules.push(FilesystemRule {
+                path: final_pattern.clone(),
+                access,
+            });
+            chosen_patterns.push(final_pattern);
         }
 
         println!();
-    }
-
-    // Handle remaining paths
-    let remaining: Vec<_> = paths
-        .iter()
-        .filter(|p| !processed.contains(*p))
-        .collect();
-
-    if !remaining.is_empty() {
-        println!("{} paths not yet handled", remaining.len());
-
-        let action = Select::new()
-            .with_prompt("How to handle remaining paths?")
-            .items(&[
-                "Add each as exact match",
-                "Skip (rely on Landlock defaults)",
-            ])
-            .default(1)
-            .interact()?;
-
-        if action == 0 {
-            for path in remaining {
-                policy.filesystem.rules.push(FilesystemRule {
-                    path: path.clone(),
-                    access: vec!["read_file".to_string()],
-                });
-            }
-        }
     }
 
     Ok(())
