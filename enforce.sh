@@ -2,4 +2,4 @@
 set -euox pipefail
 
 CMD="$@"
-./target/release/scmm-enforce -v -p ls.policy.scmm-pol -- ${CMD}
+./target/release/scmm-enforce -p ls.policy.scmm-pol -- ${CMD}
