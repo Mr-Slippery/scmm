@@ -228,6 +228,7 @@ fn generate_seccomp_filter(policy: &YamlPolicy, arch_id: u32) -> Result<Vec<u8>>
         322, // execveat
         231, // exit_group
         60,  // exit
+        15,  // rt_sigreturn (kernel uses this to return from signal handlers; not recordable)
         157, // prctl (needed for PR_SET_NO_NEW_PRIVS)
         444, // landlock_create_ruleset
         445, // landlock_add_rule
