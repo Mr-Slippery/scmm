@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-NIGHTLY="nightly-2026-01-15"
+NIGHTLY="nightly-2026-01-22"
 
 # Ensure nightly toolchain + rust-src are available
 if ! rustup toolchain list | grep -q "$NIGHTLY"; then

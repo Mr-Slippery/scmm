@@ -392,7 +392,7 @@ impl Recorder {
             self.writer.write_event(&full_event)?;
             self.event_count += 1;
 
-            if self.event_count % 10000 == 0 {
+            if self.event_count.is_multiple_of(10000) {
                 trace!("Processed {} events", self.event_count);
 
                 // Prune stale pending entries: remove entries whose timestamp
