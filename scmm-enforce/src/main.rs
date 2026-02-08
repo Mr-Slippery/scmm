@@ -21,6 +21,8 @@ mod landlock;
 mod loader;
 mod seccomp;
 
+use caps::{CapSet, CapsHashSet};
+
 /// Enforcement mode
 #[derive(Debug, Clone, Copy, ValueEnum, Default)]
 pub enum EnforcementMode {
@@ -97,8 +99,24 @@ fn run(args: Args) -> Result<ExitCode> {
         caps.seccomp, caps.landlock
     );
 
-    // Set NO_NEW_PRIVS before applying seccomp (required by kernel)
-    set_no_new_privs()?;
+    // Apply capabilities if requested (requires root)
+    if policy.capabilities != 0 {
+        apply_capabilities(policy.capabilities)?;
+    }
+
+    // Set NO_NEW_PRIVS before applying seccomp (required by kernel unless we have CAP_SYS_ADMIN)
+    // IMPORTANT: NO_NEW_PRIVS clears Ambient capabilities!
+    // If we rely on Ambient capabilities (which we do if policy.capabilities is set),
+    // we MUST NOT set NO_NEW_PRIVS. In that case, we must have CAP_SYS_ADMIN to load the filter.
+    if policy.capabilities == 0 {
+        set_no_new_privs()?;
+    } else {
+        info!("Skipping NO_NEW_PRIVS to preserve Ambient capabilities");
+        // Verify we have CAP_SYS_ADMIN, otherwise seccomp loading will fail
+        if !caps::has_cap(None, CapSet::Effective, caps::Capability::CAP_SYS_ADMIN).unwrap_or(false) {
+            warn!("Warning: CAP_SYS_ADMIN is missing. Seccomp filter loading will likely fail without NO_NEW_PRIVS.");
+        }
+    }
 
     // Apply enforcement based on mode.
     // Landlock must be applied BEFORE seccomp because the Landlock syscalls
@@ -208,4 +226,55 @@ fn exec_command(command: &[String]) -> Result<ExitCode> {
 
     // If we get here, exec failed
     Err(anyhow::anyhow!("Failed to execute {}: {:?}", command[0], err))
+}
+
+/// Apply requested capabilities to the Ambient set
+fn apply_capabilities(mask: u64) -> Result<()> {
+    if mask == 0 {
+        return Ok(());
+    }
+
+    info!("Applying capabilities (mask: {:#x})", mask);
+
+    let mut to_raise = CapsHashSet::new();
+    for cap in caps::all() {
+        if (mask & (1 << cap.index())) != 0 {
+            to_raise.insert(cap);
+        }
+    }
+
+    if to_raise.is_empty() {
+        return Ok(());
+    }
+
+    info!("Requested capabilities: {:?}", to_raise);
+
+    // 1. Ensure permitted/effective
+    let current = caps::read(None, CapSet::Effective)?;
+    let missing: CapsHashSet = to_raise.difference(&current).cloned().collect();
+    
+    if !missing.is_empty() {
+        warn!("Missing effective capabilities: {:?}. scmm-enforce should be run as root.", missing);
+        // Attempting to proceed anyway, but it will likely fail to set ambient
+    }
+
+    // 2. Add to Inheritable
+    // We must read current inheritable, add our caps, and set it back
+    let mut inheritable = caps::read(None, CapSet::Inheritable)?;
+    inheritable.extend(to_raise.iter().cloned());
+    caps::set(None, CapSet::Inheritable, &inheritable).context("Failed to set Inheritable capabilities")?;
+
+    // 3. Add to Ambient
+    // Loop and raise each one
+    for cap in to_raise {
+        // We use the 'raise' function which maps to PR_CAP_AMBIENT_RAISE
+        if let Err(e) = caps::raise(None, CapSet::Ambient, cap) {
+            warn!("Failed to raise ambient capability {:?}: {}", cap, e);
+            warn!("Ensure you are running a kernel with Ambient Capabilities support (4.3+)");
+            return Err(e.into());
+        }
+    }
+    
+    info!("Ambient capabilities set successfully");
+    Ok(())
 }

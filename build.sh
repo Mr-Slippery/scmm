@@ -28,11 +28,14 @@ cargo build --workspace --exclude scmm-ebpf --release
 
 echo "=== Setting capabilities for unprivileged eBPF ==="
 if command -v setcap >/dev/null 2>&1; then
-    sudo setcap cap_bpf,cap_perfmon,cap_dac_read_search=ep target/release/scmm-record && \
+    sudo setcap cap_net_raw,cap_bpf,cap_perfmon,cap_dac_read_search=ep target/release/scmm-record && \
         echo "Set cap_bpf,cap_perfmon,cap_dac_read_search on scmm-record (run without sudo)" || \
         echo "Warning: setcap failed - scmm-record will require sudo"
+    sudo setcap cap_sys_admin=ep target/release/scmm-enforce && \
+        echo "Set cap_net_raw,cap_sys_admin on scmm-enforce (run without sudo)" || \
+        echo "Warning: setcap failed - scmm-enforce will require sudo"
 else
-    echo "Warning: setcap not found - scmm-record will require sudo"
+    echo "Warning: setcap not found - scmm-record and scmm-enforce will require sudo"
 fi
 
 echo "=== Done ==="

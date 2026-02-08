@@ -96,11 +96,15 @@ pub fn compile(policy: &YamlPolicy, target_arch: &str) -> Result<Vec<u8>> {
     // Build path table
     let path_table = generate_path_table(policy)?;
 
+    // Build capabilities
+    let capabilities = generate_capabilities(policy)?;
+
     // Calculate offsets
     let header_size = std::mem::size_of::<CompiledPolicyHeader>();
     let seccomp_offset = header_size;
     let landlock_offset = seccomp_offset + seccomp_filter.len();
     let path_table_offset = landlock_offset + landlock_rules.len();
+    let capabilities_offset = path_table_offset + path_table.len();
 
     // Build flags
     let mut flags = 0u32;
@@ -127,6 +131,8 @@ pub fn compile(policy: &YamlPolicy, target_arch: &str) -> Result<Vec<u8>> {
     header.landlock_rules_len = landlock_rules.len() as u32;
     header.path_table_offset = path_table_offset as u32;
     header.path_table_len = path_table.len() as u32;
+    header.capabilities_offset = capabilities_offset as u32;
+    header.capabilities_len = capabilities.len() as u32;
 
     // Write header
     let header_bytes = unsafe { scmm_common::struct_to_bytes(&header) };
@@ -140,6 +146,9 @@ pub fn compile(policy: &YamlPolicy, target_arch: &str) -> Result<Vec<u8>> {
 
     // Write path table
     output.extend_from_slice(&path_table);
+
+    // Write capabilities
+    output.extend_from_slice(&capabilities);
 
     Ok(output)
 }
@@ -662,6 +671,36 @@ fn generate_path_table(policy: &YamlPolicy) -> Result<Vec<u8>> {
         output.extend_from_slice(path_bytes);
         output.push(0); // Null terminator
     }
+
+
+    Ok(output)
+}
+
+/// Generate capability bitmask
+fn generate_capabilities(policy: &YamlPolicy) -> Result<Vec<u8>> {
+    let mut caps_mask: u64 = 0;
+
+    for cap_name in &policy.capabilities {
+        let cap = match cap_name.parse::<caps::Capability>() {
+            Ok(c) => c,
+            Err(_) => {
+                // Try with CAP_ prefix if missing
+                if !cap_name.starts_with("CAP_") {
+                    match format!("CAP_{}", cap_name).parse::<caps::Capability>() {
+                        Ok(c) => c,
+                        Err(_) => anyhow::bail!("Unknown capability: {}", cap_name),
+                    }
+                } else {
+                    anyhow::bail!("Unknown capability: {}", cap_name);
+                }
+            }
+        };
+
+        caps_mask |= 1 << cap.index();
+    }
+
+    let mut output = Vec::new();
+    output.write_u64::<LittleEndian>(caps_mask)?;
 
     Ok(output)
 }

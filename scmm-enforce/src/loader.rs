@@ -17,6 +17,8 @@ pub struct LoadedPolicy {
     pub landlock_rules: Vec<LandlockRule>,
     /// Path strings
     pub paths: Vec<String>,
+    /// Capabilities bitmask
+    pub capabilities: u64,
 }
 
 /// Landlock rule
@@ -67,10 +69,22 @@ pub fn load_policy(path: &Path) -> Result<LoadedPolicy> {
 
     let paths = parse_path_table(&path_data)?;
 
+    // Read capabilities
+    let mut caps_data = vec![0u8; header.capabilities_len as usize];
+    if !caps_data.is_empty() {
+        file.read_exact(&mut caps_data)?;
+    }
+    let capabilities = if caps_data.len() >= 8 {
+        std::io::Cursor::new(caps_data).read_u64::<LittleEndian>()?
+    } else {
+        0
+    };
+
     Ok(LoadedPolicy {
         seccomp_filter,
         landlock_rules,
         paths,
+        capabilities,
     })
 }
 

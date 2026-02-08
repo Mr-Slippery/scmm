@@ -48,8 +48,12 @@ pub struct CompiledPolicyHeader {
     pub path_table_offset: u32,
     /// Length of path string table
     pub path_table_len: u32,
+    /// Offset to capabilities list (u64 bitmask)
+    pub capabilities_offset: u32,
+    /// Length of capabilities list (bytes)
+    pub capabilities_len: u32,
     /// Reserved for future use
-    pub _reserved: [u8; 24],
+    pub _reserved: [u8; 16],
 }
 
 impl Default for CompiledPolicyHeader {
@@ -67,7 +71,9 @@ impl Default for CompiledPolicyHeader {
             landlock_rules_len: 0,
             path_table_offset: 0,
             path_table_len: 0,
-            _reserved: [0; 24],
+            capabilities_offset: 0,
+            capabilities_len: 0,
+            _reserved: [0; 16],
         }
     }
 }
@@ -101,6 +107,9 @@ pub struct YamlPolicy {
     /// Syscall rules
     #[serde(default)]
     pub syscalls: Vec<SyscallRule>,
+    /// Capabilities to raise (in ambient set)
+    #[serde(default)]
+    pub capabilities: Vec<String>,
     /// Filesystem rules (for Landlock)
     #[serde(default)]
     pub filesystem: FilesystemRules,

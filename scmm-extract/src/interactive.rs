@@ -5,7 +5,7 @@ use std::path::Path;
 
 use anyhow::Result;
 use console::style;
-use dialoguer::{Input, Select};
+use dialoguer::{Input, MultiSelect, Select};
 
 use scmm_common::{
     categories::x86_64 as syscalls,
@@ -34,6 +34,7 @@ pub fn run_interactive_extraction(capture: &ParsedCapture, policy_name: &str) ->
         },
         settings: PolicySettings::default(),
         syscalls: Vec::new(),
+        capabilities: Vec::new(),
         filesystem: FilesystemRules::default(),
         network: NetworkRules::default(),
     };
@@ -96,8 +97,58 @@ pub fn run_interactive_extraction(capture: &ParsedCapture, policy_name: &str) ->
     let connections = extract_network_connections(capture);
     if !connections.is_empty() {
         process_network(&mut policy, &connections)?;
-    } else {
         println!("No network connections found in capture.");
+    }
+
+    // Ask for capabilities
+    println!();
+    println!("{}", style("Analyzing capabilities...").bold());
+    println!("Note: Capabilities cannot be automatically detected reliably from syscalls.");
+
+    let common_caps = vec![
+        ("CAP_NET_RAW", "Raw sockets (ping, net tools)"),
+        ("CAP_NET_ADMIN", "Network configuration"),
+        ("CAP_SYS_ADMIN", "System administration (mount, etc)"),
+        ("CAP_SYS_PTRACE", "Ptrace (debugging)"),
+        ("CAP_DAC_OVERRIDE", "Bypass file permission checks"),
+        ("CAP_CHOWN", "Change file ownership"),
+        ("CAP_SETUID", "Set user ID"),
+        ("CAP_SETGID", "Set group ID"),
+        ("CAP_KILL", "Send signals to other processes"),
+    ];
+
+    let items: Vec<String> = common_caps
+        .iter()
+        .map(|(cap, desc)| format!("{} - {}", cap, desc))
+        .collect();
+
+    let selection = MultiSelect::new()
+        .with_prompt("Select additional capabilities to grant (SPACE to select, ENTER to confirm)")
+        .items(&items)
+        .interact()?;
+
+    for idx in selection {
+        policy.capabilities.push(common_caps[idx].0.to_string());
+    }
+
+    // Allow custom capabilities
+    if Select::new()
+        .with_prompt("Do you want to add any other custom capabilities?")
+        .items(&["No", "Yes"])
+        .default(0)
+        .interact()? == 1
+    {
+        loop {
+            let cap: String = Input::new()
+                .with_prompt("Enter capability name (e.g. CAP_SYS_TIME) or empty to finish")
+                .allow_empty(true)
+                .interact_text()?;
+            
+            if cap.is_empty() {
+                break;
+            }
+            policy.capabilities.push(cap.to_uppercase());
+        }
     }
 
     Ok(policy)
