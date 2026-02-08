@@ -415,14 +415,15 @@ impl Recorder {
 
     /// Build a full SyscallEvent from ring buffer event
     fn build_full_event(&self, exit: &RingBufEvent, entry: Option<&RingBufEvent>) -> SyscallEvent {
-        let mut event = SyscallEvent::default();
-
-        event.timestamp_ns = exit.timestamp_ns;
-        event.pid = exit.pid;
-        event.tid = exit.tid;
-        event.syscall_nr = exit.syscall_nr;
-        event.ret_val = exit.ret_val;
-        event.arch = arch::X86_64;
+        let mut event = SyscallEvent {
+            timestamp_ns: exit.timestamp_ns,
+            pid: exit.pid,
+            tid: exit.tid,
+            syscall_nr: exit.syscall_nr,
+            ret_val: exit.ret_val,
+            arch: arch::X86_64,
+            ..Default::default()
+        };
 
         // Copy arguments from entry if available
         if let Some(entry) = entry {

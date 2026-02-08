@@ -46,13 +46,7 @@ pub fn parse_capture(path: &Path) -> Result<ParsedCapture> {
     let mut events = Vec::new();
     let mut prev_timestamp = 0u64;
 
-    loop {
-        // Try to read block header
-        let block_type = match reader.read_u32::<LittleEndian>() {
-            Ok(t) => t,
-            Err(_) => break, // EOF
-        };
-
+    while let Ok(block_type) = reader.read_u32::<LittleEndian>() {
         let compressed_size = reader.read_u32::<LittleEndian>()?;
         let uncompressed_size = reader.read_u32::<LittleEndian>()?;
         let event_count = reader.read_u32::<LittleEndian>()?;

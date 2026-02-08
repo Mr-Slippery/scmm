@@ -71,7 +71,7 @@ pub fn run_interactive_extraction(
              Adding {} observed syscalls to policy for documentation.",
             syscall_counts.len()
         );
-        for (&nr, _) in &syscall_counts {
+        for &nr in syscall_counts.keys() {
             policy.syscalls.push(SyscallRule {
                 name: syscalls::get_name(nr).to_string(),
                 action: Action::Allow,

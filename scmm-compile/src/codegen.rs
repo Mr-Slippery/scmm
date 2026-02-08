@@ -130,17 +130,19 @@ pub fn compile(policy: &YamlPolicy, target_arch: &str) -> Result<Vec<u8>> {
     }
 
     // Build header
-    let mut header = CompiledPolicyHeader::default();
-    header.arch = arch_id;
-    header.flags = flags;
-    header.seccomp_filter_offset = seccomp_offset as u32;
-    header.seccomp_filter_len = seccomp_filter.len() as u32;
-    header.landlock_rules_offset = landlock_offset as u32;
-    header.landlock_rules_len = landlock_rules.len() as u32;
-    header.path_table_offset = path_table_offset as u32;
-    header.path_table_len = path_table.len() as u32;
-    header.capabilities_offset = capabilities_offset as u32;
-    header.capabilities_len = capabilities.len() as u32;
+    let header = CompiledPolicyHeader {
+        arch: arch_id,
+        flags,
+        seccomp_filter_offset: seccomp_offset as u32,
+        seccomp_filter_len: seccomp_filter.len() as u32,
+        landlock_rules_offset: landlock_offset as u32,
+        landlock_rules_len: landlock_rules.len() as u32,
+        path_table_offset: path_table_offset as u32,
+        path_table_len: path_table.len() as u32,
+        capabilities_offset: capabilities_offset as u32,
+        capabilities_len: capabilities.len() as u32,
+        ..Default::default()
+    };
 
     // Write header
     let header_bytes = unsafe { scmm_common::struct_to_bytes(&header) };
@@ -320,24 +322,16 @@ fn generate_seccomp_filter(policy: &YamlPolicy, arch_id: u32) -> Result<Vec<u8>>
 
     // ── Phase 3: Assemble program ──────────────────────────────────────
 
-    let mut prog: Vec<PendingInsn> = Vec::new();
-
-    // [0] LD arch (offset 4 in seccomp_data)
-    prog.push(PendingInsn::new(BPF_LD | BPF_W | BPF_ABS, 0, 0, 4));
-
-    // [1] JEQ arch_id → +1 / kill
-    prog.push(PendingInsn::new(BPF_JMP | BPF_JEQ | BPF_K, 1, 0, arch_id));
-
-    // [2] RET KILL_PROCESS
-    prog.push(PendingInsn::new(
-        BPF_RET | BPF_K,
-        0,
-        0,
-        SECCOMP_RET_KILL_PROCESS,
-    ));
-
-    // [3] LD syscall_nr (offset 0)
-    prog.push(PendingInsn::new(BPF_LD | BPF_W | BPF_ABS, 0, 0, 0));
+    let mut prog: Vec<PendingInsn> = vec![
+        // [0] LD arch (offset 4 in seccomp_data)
+        PendingInsn::new(BPF_LD | BPF_W | BPF_ABS, 0, 0, 4),
+        // [1] JEQ arch_id → +1 / kill
+        PendingInsn::new(BPF_JMP | BPF_JEQ | BPF_K, 1, 0, arch_id),
+        // [2] RET KILL_PROCESS
+        PendingInsn::new(BPF_RET | BPF_K, 0, 0, SECCOMP_RET_KILL_PROCESS),
+        // [3] LD syscall_nr (offset 0)
+        PendingInsn::new(BPF_LD | BPF_W | BPF_ABS, 0, 0, 0),
+    ];
 
     // ── Unconstrained deny checks ──
     // JEQ deny_nr → deny_label (jt fixup)
@@ -404,6 +398,7 @@ fn generate_seccomp_filter(policy: &YamlPolicy, arch_id: u32) -> Result<Vec<u8>>
     // ── Phase 4: Patch fixups ──────────────────────────────────────────
 
     // Patch label fixups
+    #[allow(clippy::needless_range_loop)]
     for i in 0..prog.len() {
         if let Some(label) = prog[i].fixup_jt {
             let target = match label {

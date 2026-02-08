@@ -25,7 +25,7 @@ pub fn apply_filter(filter_data: &[u8]) -> Result<()> {
     }
 
     // Each sock_filter is 8 bytes
-    if filter_data.len() % 8 != 0 {
+    if !filter_data.len().is_multiple_of(8) {
         bail!(
             "Invalid filter size: {} bytes (must be multiple of 8)",
             filter_data.len()

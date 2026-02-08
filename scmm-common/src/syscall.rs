@@ -7,10 +7,11 @@ use serde::{Deserialize, Serialize};
 
 /// Type of syscall argument
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(not(feature = "no_std"), derive(Serialize, Deserialize))]
 pub enum ArgType {
     /// Unknown or unhandled type
+    #[default]
     Unknown = 0,
     /// Integer value (includes pointers we don't dereference)
     Integer = 1,
@@ -32,12 +33,6 @@ pub enum ArgType {
     Signal = 9,
     /// Process ID
     Pid = 10,
-}
-
-impl Default for ArgType {
-    fn default() -> Self {
-        ArgType::Unknown
-    }
 }
 
 /// A single syscall argument with its type and value
@@ -97,7 +92,7 @@ impl core::fmt::Debug for SyscallArg {
 
 /// Complete syscall event captured by eBPF
 #[repr(C)]
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct SyscallEvent {
     /// Monotonic timestamp in nanoseconds
     pub timestamp_ns: u64,
@@ -123,25 +118,6 @@ pub struct SyscallEvent {
     pub ppid: u32,
     /// Event flags
     pub flags: u32,
-}
-
-impl Default for SyscallEvent {
-    fn default() -> Self {
-        Self {
-            timestamp_ns: 0,
-            pid: 0,
-            tid: 0,
-            uid: 0,
-            gid: 0,
-            syscall_nr: 0,
-            arch: 0,
-            ret_val: 0,
-            args: Default::default(),
-            comm: [0u8; 16],
-            ppid: 0,
-            flags: 0,
-        }
-    }
 }
 
 impl core::fmt::Debug for SyscallEvent {

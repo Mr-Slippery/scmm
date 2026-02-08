@@ -42,13 +42,15 @@ impl CaptureWriter {
         let mut file = BufWriter::new(file);
 
         // Initialize header
-        let mut header = CaptureFileHeader::default();
-        header.arch = arch;
-        header.flags = capture_flags::LITTLE_ENDIAN | capture_flags::HAS_ARG_STRINGS;
-        header.start_time_ns = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64;
+        let header = CaptureFileHeader {
+            arch,
+            flags: capture_flags::LITTLE_ENDIAN | capture_flags::HAS_ARG_STRINGS,
+            start_time_ns: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos() as u64,
+            ..Default::default()
+        };
 
         // Write placeholder header (will be updated on finalize)
         let header_bytes = unsafe { scmm_common::struct_to_bytes(&header) };

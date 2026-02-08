@@ -41,7 +41,7 @@ fn main() {
             0x01, // ELF version
             0x00, // OS/ABI
         ];
-        fs::write(&ebpf_path, &placeholder).expect("Failed to write placeholder");
+        fs::write(&ebpf_path, placeholder).expect("Failed to write placeholder");
 
         println!("cargo:warning=eBPF program not found. Build with: cargo xtask build-ebpf");
     }
