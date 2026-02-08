@@ -195,10 +195,7 @@ fn set_no_new_privs() -> Result<()> {
     Ok(())
 }
 
-/// Execute the command (replaces current process).
-///
-/// This runs AFTER seccomp is applied, so write/writev may be blocked.
-/// If execvp fails we cannot safely use formatting or eprintln — just _exit.
+/// Execute the command (replaces current process)
 fn exec_command(command: &[String]) -> Result<ExitCode> {
     let program = CString::new(command[0].as_bytes())?;
     let args: Vec<CString> = command
@@ -207,9 +204,8 @@ fn exec_command(command: &[String]) -> Result<ExitCode> {
         .collect();
 
     // Use execvp to search PATH
-    let _err = nix::unistd::execvp(&program, &args);
+    let err = nix::unistd::execvp(&program, &args);
 
-    // If we get here, exec failed. We cannot use eprintln/format! because
-    // write() may be blocked by seccomp. Exit with code 127 (command not found).
-    unsafe { libc::_exit(127) }
+    // If we get here, exec failed
+    Err(anyhow::anyhow!("Failed to execute {}: {:?}", command[0], err))
 }
