@@ -59,9 +59,7 @@ impl CaptureWriter {
 
         // Initialize metadata
         let metadata = CaptureMetadata {
-            hostname: gethostname::gethostname()
-                .to_string_lossy()
-                .to_string(),
+            hostname: gethostname::gethostname().to_string_lossy().to_string(),
             kernel_release: get_kernel_release(),
             working_dir: std::env::current_dir()
                 .map(|p| p.to_string_lossy().to_string())
@@ -125,7 +123,8 @@ impl CaptureWriter {
             .write_u32::<LittleEndian>(delta.min(u32::MAX as u64) as u32)?;
 
         // Flags (2 bytes)
-        self.event_buffer.write_u16::<LittleEndian>(event.flags as u16)?;
+        self.event_buffer
+            .write_u16::<LittleEndian>(event.flags as u16)?;
 
         // Syscall number (2 bytes)
         self.event_buffer
@@ -142,8 +141,7 @@ impl CaptureWriter {
 
         // Arguments (6 * 8 bytes = 48 bytes)
         for arg in &event.args {
-            self.event_buffer
-                .write_u64::<LittleEndian>(arg.raw_value)?;
+            self.event_buffer.write_u64::<LittleEndian>(arg.raw_value)?;
         }
 
         // Argument string data (variable length)
@@ -169,8 +167,7 @@ impl CaptureWriter {
             {
                 self.event_buffer.write_u8(i as u8)?;
                 self.event_buffer.write_u8(arg.arg_type as u8)?;
-                self.event_buffer
-                    .write_u16::<LittleEndian>(arg.str_len)?;
+                self.event_buffer.write_u16::<LittleEndian>(arg.str_len)?;
                 self.event_buffer
                     .write_all(&arg.str_data[..arg.str_len as usize])?;
             }
@@ -227,7 +224,8 @@ impl CaptureWriter {
         let block_type: u32 = scmm_common::capture::block_type::METADATA;
         self.file.write_u32::<LittleEndian>(block_type)?;
         self.file.write_u32::<LittleEndian>(0)?; // compressed size
-        self.file.write_u32::<LittleEndian>(metadata_json.len() as u32)?;
+        self.file
+            .write_u32::<LittleEndian>(metadata_json.len() as u32)?;
         self.file.write_u32::<LittleEndian>(0)?; // event count
         self.file.write_u64::<LittleEndian>(0)?; // first timestamp
         self.file.write_u64::<LittleEndian>(0)?; // last timestamp

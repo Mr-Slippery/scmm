@@ -86,9 +86,13 @@ fn run(args: Args) -> Result<()> {
     }
 
     // Run interactive extraction
-    let policy_name = args
-        .name
-        .unwrap_or_else(|| args.input.file_stem().unwrap().to_string_lossy().to_string());
+    let policy_name = args.name.unwrap_or_else(|| {
+        args.input
+            .file_stem()
+            .unwrap()
+            .to_string_lossy()
+            .to_string()
+    });
 
     let policy = interactive::run_interactive_extraction(&capture, &policy_name)?;
 

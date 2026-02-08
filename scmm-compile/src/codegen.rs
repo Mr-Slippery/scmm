@@ -62,7 +62,15 @@ struct PendingInsn {
 
 impl PendingInsn {
     fn new(code: u16, jt: u8, jf: u8, k: u32) -> Self {
-        Self { code, jt, jf, k, fixup_jt: None, fixup_jf: None, fixup_k: None }
+        Self {
+            code,
+            jt,
+            jf,
+            k,
+            fixup_jt: None,
+            fixup_jf: None,
+            fixup_k: None,
+        }
     }
 }
 
@@ -170,7 +178,12 @@ fn safe_offset(from: usize, to: usize) -> Result<u8> {
         .checked_sub(from + 1)
         .ok_or_else(|| anyhow::anyhow!("backward jump in BPF: from={} to={}", from, to))?;
     if offset > 255 {
-        bail!("BPF jump offset {} exceeds max 255 (from={} to={})", offset, from, to);
+        bail!(
+            "BPF jump offset {} exceeds max 255 (from={} to={})",
+            offset,
+            from,
+            to
+        );
     }
     Ok(offset as u8)
 }
@@ -296,7 +309,10 @@ fn generate_seccomp_filter(policy: &YamlPolicy, arch_id: u32) -> Result<Vec<u8>>
         let block = build_constraint_block(nr, action, constraints)?;
         if block.is_empty() {
             // All constraints were unenforecable (pointer types) — treat as unconstrained
-            warn!("Syscall nr {} has no enforceable constraints, treating as unconstrained", nr);
+            warn!(
+                "Syscall nr {} has no enforceable constraints, treating as unconstrained",
+                nr
+            );
             continue;
         }
         constraint_blocks.push((nr, block));
@@ -313,7 +329,12 @@ fn generate_seccomp_filter(policy: &YamlPolicy, arch_id: u32) -> Result<Vec<u8>>
     prog.push(PendingInsn::new(BPF_JMP | BPF_JEQ | BPF_K, 1, 0, arch_id));
 
     // [2] RET KILL_PROCESS
-    prog.push(PendingInsn::new(BPF_RET | BPF_K, 0, 0, SECCOMP_RET_KILL_PROCESS));
+    prog.push(PendingInsn::new(
+        BPF_RET | BPF_K,
+        0,
+        0,
+        SECCOMP_RET_KILL_PROCESS,
+    ));
 
     // [3] LD syscall_nr (offset 0)
     prog.push(PendingInsn::new(BPF_LD | BPF_W | BPF_ABS, 0, 0, 0));
@@ -370,7 +391,12 @@ fn generate_seccomp_filter(policy: &YamlPolicy, arch_id: u32) -> Result<Vec<u8>>
 
     // ── Terminal labels ──
     let deny_label_pos = prog.len();
-    prog.push(PendingInsn::new(BPF_RET | BPF_K, 0, 0, SECCOMP_RET_ERRNO | EPERM));
+    prog.push(PendingInsn::new(
+        BPF_RET | BPF_K,
+        0,
+        0,
+        SECCOMP_RET_ERRNO | EPERM,
+    ));
 
     let allow_label_pos = prog.len();
     prog.push(PendingInsn::new(BPF_RET | BPF_K, 0, 0, SECCOMP_RET_ALLOW));
@@ -614,7 +640,12 @@ fn build_integer_constraint(
     let n = values.len();
     for (i, &val) in values.iter().enumerate() {
         let skip = (n - i) as u8; // jump over remaining JEQs + JA
-        insns.push(PendingInsn::new(BPF_JMP | BPF_JEQ | BPF_K, skip, 0, val as u32));
+        insns.push(PendingInsn::new(
+            BPF_JMP | BPF_JEQ | BPF_K,
+            skip,
+            0,
+            val as u32,
+        ));
     }
 
     // No match → fail
@@ -672,7 +703,6 @@ fn generate_path_table(policy: &YamlPolicy) -> Result<Vec<u8>> {
         output.extend_from_slice(path_bytes);
         output.push(0); // Null terminator
     }
-
 
     Ok(output)
 }

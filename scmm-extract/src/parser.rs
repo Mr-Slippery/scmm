@@ -108,10 +108,7 @@ pub fn parse_capture(path: &Path) -> Result<ParsedCapture> {
         CaptureMetadata::default()
     };
 
-    Ok(ParsedCapture {
-        metadata,
-        events,
-    })
+    Ok(ParsedCapture { metadata, events })
 }
 
 /// Parse a single event from the data buffer

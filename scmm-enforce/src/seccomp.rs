@@ -26,7 +26,10 @@ pub fn apply_filter(filter_data: &[u8]) -> Result<()> {
 
     // Each sock_filter is 8 bytes
     if filter_data.len() % 8 != 0 {
-        bail!("Invalid filter size: {} bytes (must be multiple of 8)", filter_data.len());
+        bail!(
+            "Invalid filter size: {} bytes (must be multiple of 8)",
+            filter_data.len()
+        );
     }
 
     let filter_count = filter_data.len() / 8;
@@ -59,4 +62,3 @@ pub fn apply_filter(filter_data: &[u8]) -> Result<()> {
 
     Ok(())
 }
-

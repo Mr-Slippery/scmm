@@ -10,8 +10,8 @@ use dialoguer::{Input, MultiSelect, Select};
 use scmm_common::{
     categories::x86_64 as syscalls,
     policy::{
-        landlock_access, Action, FilesystemRule, FilesystemRules, NetworkRule,
-        NetworkRules, PolicyMetadata, PolicySettings, SyscallRule, YamlPolicy,
+        landlock_access, Action, FilesystemRule, FilesystemRules, NetworkRule, NetworkRules,
+        PolicyMetadata, PolicySettings, SyscallRule, YamlPolicy,
     },
     ArgType, SyscallCategory,
 };
@@ -19,7 +19,10 @@ use scmm_common::{
 use crate::parser::ParsedCapture;
 
 /// Run interactive extraction
-pub fn run_interactive_extraction(capture: &ParsedCapture, policy_name: &str) -> Result<YamlPolicy> {
+pub fn run_interactive_extraction(
+    capture: &ParsedCapture,
+    policy_name: &str,
+) -> Result<YamlPolicy> {
     let mut policy = YamlPolicy {
         version: "1.0".to_string(),
         metadata: PolicyMetadata {
@@ -142,7 +145,9 @@ pub fn run_interactive_extraction(capture: &ParsedCapture, policy_name: &str) ->
             .collect();
 
         let selection = MultiSelect::new()
-            .with_prompt("Select additional capabilities to grant (SPACE to select, ENTER to confirm)")
+            .with_prompt(
+                "Select additional capabilities to grant (SPACE to select, ENTER to confirm)",
+            )
             .items(&items)
             .interact()?;
 
@@ -314,7 +319,9 @@ fn normalize_path(path: &str) -> String {
     for component in path.split('/') {
         match component {
             "" | "." => {}
-            ".." => { parts.pop(); }
+            ".." => {
+                parts.pop();
+            }
             other => parts.push(other),
         }
     }
@@ -374,7 +381,9 @@ fn extract_file_paths(capture: &ParsedCapture) -> Vec<FileAccessInfo> {
                     let is_create = (flags_val & O_CREAT) != 0;
                     let is_trunc = (flags_val & O_TRUNC) != 0;
 
-                    let entry = path_map.entry((normalized, event.syscall_nr)).or_insert((0, false, false, false));
+                    let entry = path_map
+                        .entry((normalized, event.syscall_nr))
+                        .or_insert((0, false, false, false));
                     entry.0 += 1;
                     entry.1 |= is_write;
                     entry.2 |= is_create;
@@ -387,7 +396,9 @@ fn extract_file_paths(capture: &ParsedCapture) -> Vec<FileAccessInfo> {
     // Group by path
     let mut by_path: HashMap<String, (Vec<String>, usize, bool, bool, bool)> = HashMap::new();
     for ((path, nr), (count, write_open, create_open, trunc_open)) in path_map {
-        let entry = by_path.entry(path).or_insert_with(|| (Vec::new(), 0, false, false, false));
+        let entry = by_path
+            .entry(path)
+            .or_insert_with(|| (Vec::new(), 0, false, false, false));
         let name = syscalls::get_name(nr).to_string();
         if !entry.0.contains(&name) {
             entry.0.push(name);
@@ -400,14 +411,18 @@ fn extract_file_paths(capture: &ParsedCapture) -> Vec<FileAccessInfo> {
 
     let mut results: Vec<FileAccessInfo> = by_path
         .into_iter()
-        .map(|(path, (syscall_names, count, has_write_open, has_create_open, has_trunc_open))| FileAccessInfo {
-            path,
-            syscall_names,
-            count,
-            has_write_open,
-            has_create_open,
-            has_trunc_open,
-        })
+        .map(
+            |(path, (syscall_names, count, has_write_open, has_create_open, has_trunc_open))| {
+                FileAccessInfo {
+                    path,
+                    syscall_names,
+                    count,
+                    has_write_open,
+                    has_create_open,
+                    has_trunc_open,
+                }
+            },
+        )
         .collect();
 
     results.sort_by(|a, b| a.path.cmp(&b.path));
@@ -464,8 +479,8 @@ fn infer_access_rights_with_flags(
             "open" | "openat" | "openat2" => {
                 rights.insert(landlock_access::READ_FILE);
             }
-            "stat" | "lstat" | "newfstatat" | "statx" | "statfs"
-            | "access" | "faccessat" | "faccessat2" => {
+            "stat" | "lstat" | "newfstatat" | "statx" | "statfs" | "access" | "faccessat"
+            | "faccessat2" => {
                 rights.insert(landlock_access::READ_FILE);
             }
             "readlink" | "readlinkat" => {
@@ -487,8 +502,8 @@ fn infer_access_rights_with_flags(
             "rename" | "renameat" | "renameat2" => {
                 rights.insert(landlock_access::REFER);
             }
-            "write" | "pwrite64" | "writev" | "pwritev" | "pwritev2"
-            | "sendfile" | "fallocate" | "ftruncate" => {
+            "write" | "pwrite64" | "writev" | "pwritev" | "pwritev2" | "sendfile" | "fallocate"
+            | "ftruncate" => {
                 rights.insert(landlock_access::WRITE_FILE);
             }
             "utimensat" | "futimesat" | "utime" | "utimes" => {
@@ -584,7 +599,11 @@ fn group_by_top_dir(file_accesses: &[FileAccessInfo]) -> Vec<(String, Vec<&FileA
 }
 
 /// Collect all access rights from a group of file accesses
-fn collect_group_rights(group: &[&FileAccessInfo], is_directory_rule: bool, pattern: &str) -> Vec<String> {
+fn collect_group_rights(
+    group: &[&FileAccessInfo],
+    is_directory_rule: bool,
+    pattern: &str,
+) -> Vec<String> {
     let all_syscalls: Vec<String> = group
         .iter()
         .flat_map(|info| info.syscall_names.iter().cloned())
@@ -592,15 +611,19 @@ fn collect_group_rights(group: &[&FileAccessInfo], is_directory_rule: bool, patt
     let has_write = group.iter().any(|info| info.has_write_open);
     let has_create = group.iter().any(|info| info.has_create_open);
     let has_trunc = group.iter().any(|info| info.has_trunc_open);
-    infer_access_rights_with_flags(&all_syscalls, is_directory_rule, pattern, has_write, has_create, has_trunc)
+    infer_access_rights_with_flags(
+        &all_syscalls,
+        is_directory_rule,
+        pattern,
+        has_write,
+        has_create,
+        has_trunc,
+    )
 }
 
 /// Process file paths interactively with per-path subtree choices
 fn process_file_paths(policy: &mut YamlPolicy, file_accesses: &[FileAccessInfo]) -> Result<()> {
-    println!(
-        "Found {} unique file paths",
-        file_accesses.len()
-    );
+    println!("Found {} unique file paths", file_accesses.len());
     println!();
 
     // First show a summary of all paths so the user has context
@@ -635,7 +658,9 @@ fn process_file_paths(policy: &mut YamlPolicy, file_accesses: &[FileAccessInfo])
 
         println!(
             "{}",
-            style(format!("Directory: {} ({} paths)", top_dir, group.len())).bold().cyan()
+            style(format!("Directory: {} ({} paths)", top_dir, group.len()))
+                .bold()
+                .cyan()
         );
 
         // Show all paths in this group
@@ -655,21 +680,33 @@ fn process_file_paths(policy: &mut YamlPolicy, file_accesses: &[FileAccessInfo])
             // Offer a group-level choice first
             let group_choices = if top_dir == "/" {
                 vec![
-                    ("Allow access to all listed root-level paths individually".to_string(), "INDIVIDUAL"),
-                    ("Allow access to everything under /** (full filesystem)".to_string(), "GLOB"),
+                    (
+                        "Allow access to all listed root-level paths individually".to_string(),
+                        "INDIVIDUAL",
+                    ),
+                    (
+                        "Allow access to everything under /** (full filesystem)".to_string(),
+                        "GLOB",
+                    ),
                     ("Custom pattern...".to_string(), "CUSTOM"),
                     ("Skip all".to_string(), "SKIP"),
                 ]
             } else {
                 vec![
                     ("Review each path individually".to_string(), "INDIVIDUAL"),
-                    (format!("Allow access to everything under {}/**", top_dir), "GLOB"),
+                    (
+                        format!("Allow access to everything under {}/**", top_dir),
+                        "GLOB",
+                    ),
                     ("Custom pattern...".to_string(), "CUSTOM"),
                     ("Skip all".to_string(), "SKIP"),
                 ]
             };
 
-            let display_items: Vec<&str> = group_choices.iter().map(|(label, _)| label.as_str()).collect();
+            let display_items: Vec<&str> = group_choices
+                .iter()
+                .map(|(label, _)| label.as_str())
+                .collect();
 
             let selection = Select::new()
                 .with_prompt("How to handle this group?")
@@ -739,7 +776,8 @@ fn process_file_paths(policy: &mut YamlPolicy, file_accesses: &[FileAccessInfo])
             );
 
             let choices = build_subtree_choices(&info.path);
-            let display_items: Vec<&str> = choices.iter().map(|(label, _)| label.as_str()).collect();
+            let display_items: Vec<&str> =
+                choices.iter().map(|(label, _)| label.as_str()).collect();
 
             let selection = Select::new()
                 .with_prompt("Choose access scope")
@@ -764,8 +802,12 @@ fn process_file_paths(policy: &mut YamlPolicy, file_accesses: &[FileAccessInfo])
 
             let is_dir = final_pattern.contains("**") || final_pattern.ends_with("/*");
             let access = infer_access_rights_with_flags(
-                &info.syscall_names, is_dir, &final_pattern,
-                info.has_write_open, info.has_create_open, info.has_trunc_open,
+                &info.syscall_names,
+                is_dir,
+                &final_pattern,
+                info.has_write_open,
+                info.has_create_open,
+                info.has_trunc_open,
             );
 
             policy.filesystem.rules.push(FilesystemRule {
@@ -788,10 +830,7 @@ fn extract_network_connections(_capture: &ParsedCapture) -> Vec<(String, u16, St
 }
 
 /// Process network connections interactively
-fn process_network(
-    policy: &mut YamlPolicy,
-    connections: &[(String, u16, String)],
-) -> Result<()> {
+fn process_network(policy: &mut YamlPolicy, connections: &[(String, u16, String)]) -> Result<()> {
     println!("Found {} unique network connections", connections.len());
 
     // Group by port

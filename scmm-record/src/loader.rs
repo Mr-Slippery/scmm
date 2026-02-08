@@ -16,8 +16,8 @@ use aya::Bpf;
 use tracing::{debug, info, trace, warn};
 
 use scmm_common::{
-    categories::x86_64 as syscalls, capture::arch, CategoryFilter, RingBufEvent,
-    SyscallEvent, ring_event_type,
+    capture::arch, categories::x86_64 as syscalls, ring_event_type, CategoryFilter, RingBufEvent,
+    SyscallEvent,
 };
 
 use crate::capture::CaptureWriter;
@@ -84,7 +84,10 @@ impl Recorder {
             let ebpf_paths = [
                 "/usr/lib/scmm/scmm-ebpf",
                 "/usr/local/lib/scmm/scmm-ebpf",
-                concat!(env!("CARGO_MANIFEST_DIR"), "/../target/bpfel-unknown-none/release/scmm-ebpf"),
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../target/bpfel-unknown-none/release/scmm-ebpf"
+                ),
             ];
 
             let mut loaded = None;
@@ -98,9 +101,9 @@ impl Recorder {
                 }
             }
 
-            loaded.ok_or_else(|| anyhow::anyhow!(
-                "Could not find eBPF program. Build with: cargo xtask build-ebpf"
-            ))?
+            loaded.ok_or_else(|| {
+                anyhow::anyhow!("Could not find eBPF program. Build with: cargo xtask build-ebpf")
+            })?
         };
 
         // Create capture writer
@@ -196,7 +199,9 @@ impl Recorder {
 
     /// Set eBPF configuration (follow_forks flag)
     fn set_config(&mut self) -> Result<()> {
-        let map = self.bpf.map_mut("CONFIG")
+        let map = self
+            .bpf
+            .map_mut("CONFIG")
             .ok_or_else(|| anyhow::anyhow!("CONFIG map not found"))?;
         let mut config: AyaArray<_, u32> = AyaArray::try_from(map)?;
         let val: u32 = if self.follow_forks { 1 } else { 0 };
@@ -232,7 +237,9 @@ impl Recorder {
 
     /// Add a PID to the tracking map
     fn add_pid(&mut self, pid: u32) -> Result<()> {
-        let map = self.bpf.map_mut("TARGET_PIDS")
+        let map = self
+            .bpf
+            .map_mut("TARGET_PIDS")
             .ok_or_else(|| anyhow::anyhow!("TARGET_PIDS map not found"))?;
         let mut target_pids: AyaHashMap<_, u32, u8> = AyaHashMap::try_from(map)?;
         target_pids.insert(pid, 1, 0)?;
@@ -249,7 +256,9 @@ impl Recorder {
         // for handle_event). More importantly, creating a RingBuf once and
         // reusing it preserves the consumer position; recreating it each
         // iteration resets the position and re-reads old events forever.
-        let events_map = self.bpf.take_map("EVENTS")
+        let events_map = self
+            .bpf
+            .take_map("EVENTS")
             .ok_or_else(|| anyhow::anyhow!("EVENTS ring buffer map not found"))?;
         let mut ring_buf = RingBuf::try_from(events_map)?;
 
@@ -292,7 +301,11 @@ impl Recorder {
                     std::thread::sleep(Duration::from_millis(5));
                     let events = Self::collect_events(&mut ring_buf);
                     if !events.is_empty() {
-                        debug!("Post-exit drain pass {}: {} events", drain_pass, events.len());
+                        debug!(
+                            "Post-exit drain pass {}: {} events",
+                            drain_pass,
+                            events.len()
+                        );
                         for event in events {
                             self.handle_event(&event)?;
                         }
@@ -319,7 +332,9 @@ impl Recorder {
     }
 
     /// Collect events from ring buffer into a Vec
-    fn collect_events<T: std::borrow::Borrow<aya::maps::MapData>>(ring_buf: &mut RingBuf<T>) -> Vec<RingBufEvent> {
+    fn collect_events<T: std::borrow::Borrow<aya::maps::MapData>>(
+        ring_buf: &mut RingBuf<T>,
+    ) -> Vec<RingBufEvent> {
         let mut events = Vec::new();
 
         while let Some(item) = ring_buf.next() {
@@ -366,10 +381,8 @@ impl Recorder {
         // Convert to full event and write
         if event.event_type == ring_event_type::SYSCALL_ENTRY {
             // Store entry for later matching with exit
-            self.pending_entries.insert(
-                (event.pid, event.tid, event.syscall_nr),
-                event.clone(),
-            );
+            self.pending_entries
+                .insert((event.pid, event.tid, event.syscall_nr), event.clone());
         } else if event.event_type == ring_event_type::SYSCALL_EXIT {
             // Try to match with entry
             let key = (event.pid, event.tid, event.syscall_nr);
@@ -388,7 +401,8 @@ impl Recorder {
                 // lost (e.g. process killed mid-syscall, ring buffer overflow).
                 let cutoff_ns = event.timestamp_ns.saturating_sub(5_000_000_000);
                 let before = self.pending_entries.len();
-                self.pending_entries.retain(|_, e| e.timestamp_ns >= cutoff_ns);
+                self.pending_entries
+                    .retain(|_, e| e.timestamp_ns >= cutoff_ns);
                 let pruned = before - self.pending_entries.len();
                 if pruned > 0 {
                     debug!("Pruned {} stale pending entries", pruned);
@@ -423,8 +437,7 @@ impl Recorder {
                 if idx < scmm_common::MAX_ARGS {
                     let len = (entry.path_str_len as usize).min(scmm_common::MAX_ARG_STR_LEN);
                     event.args[idx].arg_type = scmm_common::ArgType::Path;
-                    event.args[idx].str_data[..len]
-                        .copy_from_slice(&entry.path_data[..len]);
+                    event.args[idx].str_data[..len].copy_from_slice(&entry.path_data[..len]);
                     event.args[idx].str_len = len as u16;
                 }
             }

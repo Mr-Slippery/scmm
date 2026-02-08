@@ -293,9 +293,21 @@ pub mod landlock_access {
 
     /// All access rights in bitmap order (bit 0 = execute, bit 1 = write_file, etc.)
     const ALL_RIGHTS: &[&str] = &[
-        EXECUTE, WRITE_FILE, READ_FILE, READ_DIR, REMOVE_DIR, REMOVE_FILE,
-        MAKE_CHAR, MAKE_DIR, MAKE_REG, MAKE_SOCK, MAKE_FIFO, MAKE_BLOCK,
-        MAKE_SYM, REFER, TRUNCATE,
+        EXECUTE,
+        WRITE_FILE,
+        READ_FILE,
+        READ_DIR,
+        REMOVE_DIR,
+        REMOVE_FILE,
+        MAKE_CHAR,
+        MAKE_DIR,
+        MAKE_REG,
+        MAKE_SOCK,
+        MAKE_FIFO,
+        MAKE_BLOCK,
+        MAKE_SYM,
+        REFER,
+        TRUNCATE,
     ];
 
     /// Convert an access right name to its bitmap bit value.

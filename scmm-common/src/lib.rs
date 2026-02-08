@@ -5,17 +5,17 @@
 
 #![cfg_attr(feature = "no_std", no_std)]
 
-pub mod syscall;
 pub mod capture;
-pub mod policy;
 pub mod categories;
 #[cfg(not(feature = "no_std"))]
 pub mod flags;
+pub mod policy;
+pub mod syscall;
 
-pub use syscall::*;
 pub use capture::*;
-pub use policy::*;
 pub use categories::*;
+pub use policy::*;
+pub use syscall::*;
 
 /// Maximum path length we capture from syscall arguments
 pub const MAX_PATH_LEN: usize = 256;
@@ -57,8 +57,7 @@ pub fn init_tracing(verbose: u8) {
         .with_target(false)
         .finish();
 
-    tracing::subscriber::set_global_default(subscriber)
-        .expect("setting default subscriber failed");
+    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 }
 
 /// Convert a `#[repr(C)]` struct to a byte slice (for writing to files).

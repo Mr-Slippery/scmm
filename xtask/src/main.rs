@@ -159,7 +159,12 @@ fn install() -> Result<()> {
     // Build release first
     build_userspace(true)?;
 
-    let tools = ["scmm-record", "scmm-extract", "scmm-compile", "scmm-enforce"];
+    let tools = [
+        "scmm-record",
+        "scmm-extract",
+        "scmm-compile",
+        "scmm-enforce",
+    ];
     let install_dir = "/usr/local/bin";
 
     for tool in &tools {

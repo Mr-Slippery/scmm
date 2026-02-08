@@ -5,8 +5,8 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use landlock::{
-    Access, AccessFs, BitFlags, CompatLevel, Compatible, PathBeneath, PathFd, Ruleset,
-    RulesetAttr, RulesetCreatedAttr, ABI,
+    Access, AccessFs, BitFlags, CompatLevel, Compatible, PathBeneath, PathFd, Ruleset, RulesetAttr,
+    RulesetCreatedAttr, ABI,
 };
 use tracing::{debug, info, warn};
 
@@ -15,21 +15,51 @@ use crate::loader::LoadedPolicy;
 /// Format access flags as a human-readable string
 fn format_access(access: BitFlags<AccessFs>) -> String {
     let mut names = Vec::new();
-    if access.contains(AccessFs::Execute) { names.push("execute"); }
-    if access.contains(AccessFs::WriteFile) { names.push("write_file"); }
-    if access.contains(AccessFs::ReadFile) { names.push("read_file"); }
-    if access.contains(AccessFs::ReadDir) { names.push("read_dir"); }
-    if access.contains(AccessFs::RemoveDir) { names.push("remove_dir"); }
-    if access.contains(AccessFs::RemoveFile) { names.push("remove_file"); }
-    if access.contains(AccessFs::MakeChar) { names.push("make_char"); }
-    if access.contains(AccessFs::MakeDir) { names.push("make_dir"); }
-    if access.contains(AccessFs::MakeReg) { names.push("make_reg"); }
-    if access.contains(AccessFs::MakeSock) { names.push("make_sock"); }
-    if access.contains(AccessFs::MakeFifo) { names.push("make_fifo"); }
-    if access.contains(AccessFs::MakeBlock) { names.push("make_block"); }
-    if access.contains(AccessFs::MakeSym) { names.push("make_sym"); }
-    if access.contains(AccessFs::Refer) { names.push("refer"); }
-    if access.contains(AccessFs::Truncate) { names.push("truncate"); }
+    if access.contains(AccessFs::Execute) {
+        names.push("execute");
+    }
+    if access.contains(AccessFs::WriteFile) {
+        names.push("write_file");
+    }
+    if access.contains(AccessFs::ReadFile) {
+        names.push("read_file");
+    }
+    if access.contains(AccessFs::ReadDir) {
+        names.push("read_dir");
+    }
+    if access.contains(AccessFs::RemoveDir) {
+        names.push("remove_dir");
+    }
+    if access.contains(AccessFs::RemoveFile) {
+        names.push("remove_file");
+    }
+    if access.contains(AccessFs::MakeChar) {
+        names.push("make_char");
+    }
+    if access.contains(AccessFs::MakeDir) {
+        names.push("make_dir");
+    }
+    if access.contains(AccessFs::MakeReg) {
+        names.push("make_reg");
+    }
+    if access.contains(AccessFs::MakeSock) {
+        names.push("make_sock");
+    }
+    if access.contains(AccessFs::MakeFifo) {
+        names.push("make_fifo");
+    }
+    if access.contains(AccessFs::MakeBlock) {
+        names.push("make_block");
+    }
+    if access.contains(AccessFs::MakeSym) {
+        names.push("make_sym");
+    }
+    if access.contains(AccessFs::Refer) {
+        names.push("refer");
+    }
+    if access.contains(AccessFs::Truncate) {
+        names.push("truncate");
+    }
     names.join(", ")
 }
 
@@ -47,7 +77,9 @@ pub fn apply(policy: &LoadedPolicy) -> Result<()> {
         .handle_access(AccessFs::from_all(abi))
         .context("Failed to create Landlock ruleset")?;
 
-    let mut ruleset_created = ruleset.create().context("Failed to create Landlock ruleset")?;
+    let mut ruleset_created = ruleset
+        .create()
+        .context("Failed to create Landlock ruleset")?;
 
     // Phase 1: Collect all expanded paths to compute ancestor directories
     let mut ancestor_dirs: HashSet<String> = HashSet::new();
@@ -112,7 +144,10 @@ pub fn apply(policy: &LoadedPolicy) -> Result<()> {
                         .set_compatibility(CompatLevel::BestEffort),
                 ) {
                     Ok(_) => {
-                        info!("  implicit: allow {} [execute, read_file] (ELF interpreter)", real_str);
+                        info!(
+                            "  implicit: allow {} [execute, read_file] (ELF interpreter)",
+                            real_str
+                        );
                         // Also add traversal for the interpreter's directory
                         if let Some(parent) = real.parent() {
                             if let Ok(dir_fd) = PathFd::new(&*parent.to_string_lossy()) {
@@ -131,7 +166,10 @@ pub fn apply(policy: &LoadedPolicy) -> Result<()> {
     }
 
     // Phase 3: Apply the actual policy rules
-    info!("Applying {} Landlock filesystem rule(s):", policy.landlock_rules.len());
+    info!(
+        "Applying {} Landlock filesystem rule(s):",
+        policy.landlock_rules.len()
+    );
     for rule in policy.landlock_rules.iter() {
         if rule.rule_type != 1 {
             continue;
@@ -219,7 +257,9 @@ fn add_path_rule(
     match PathFd::new(&expanded_path) {
         Ok(path_fd) => {
             ruleset
-                .add_rule(PathBeneath::new(path_fd, access).set_compatibility(CompatLevel::BestEffort))
+                .add_rule(
+                    PathBeneath::new(path_fd, access).set_compatibility(CompatLevel::BestEffort),
+                )
                 .context("Failed to add path rule")?;
 
             // Grant parent-directory rights on the parent if needed

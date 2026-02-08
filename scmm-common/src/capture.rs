@@ -121,4 +121,3 @@ pub mod block_type {
     /// Index block
     pub const INDEX: u32 = 4;
 }
-

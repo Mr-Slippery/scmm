@@ -113,7 +113,8 @@ fn run(args: Args) -> Result<ExitCode> {
     } else {
         info!("Skipping NO_NEW_PRIVS to preserve Ambient capabilities");
         // Verify we have CAP_SYS_ADMIN, otherwise seccomp loading will fail
-        if !caps::has_cap(None, CapSet::Effective, caps::Capability::CAP_SYS_ADMIN).unwrap_or(false) {
+        if !caps::has_cap(None, CapSet::Effective, caps::Capability::CAP_SYS_ADMIN).unwrap_or(false)
+        {
             warn!("Warning: CAP_SYS_ADMIN is missing. Seccomp filter loading will likely fail without NO_NEW_PRIVS.");
         }
     }
@@ -208,7 +209,10 @@ fn apply_seccomp(policy: &loader::LoadedPolicy) -> Result<()> {
 fn set_no_new_privs() -> Result<()> {
     let ret = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
     if ret != 0 {
-        anyhow::bail!("Failed to set NO_NEW_PRIVS: {}", std::io::Error::last_os_error());
+        anyhow::bail!(
+            "Failed to set NO_NEW_PRIVS: {}",
+            std::io::Error::last_os_error()
+        );
     }
     Ok(())
 }
@@ -225,7 +229,11 @@ fn exec_command(command: &[String]) -> Result<ExitCode> {
     let err = nix::unistd::execvp(&program, &args);
 
     // If we get here, exec failed
-    Err(anyhow::anyhow!("Failed to execute {}: {:?}", command[0], err))
+    Err(anyhow::anyhow!(
+        "Failed to execute {}: {:?}",
+        command[0],
+        err
+    ))
 }
 
 /// Apply requested capabilities to the Ambient set
@@ -252,9 +260,12 @@ fn apply_capabilities(mask: u64) -> Result<()> {
     // 1. Ensure permitted/effective
     let current = caps::read(None, CapSet::Effective)?;
     let missing: CapsHashSet = to_raise.difference(&current).cloned().collect();
-    
+
     if !missing.is_empty() {
-        warn!("Missing effective capabilities: {:?}. scmm-enforce should be run as root.", missing);
+        warn!(
+            "Missing effective capabilities: {:?}. scmm-enforce should be run as root.",
+            missing
+        );
         // Attempting to proceed anyway, but it will likely fail to set ambient
     }
 
@@ -262,7 +273,8 @@ fn apply_capabilities(mask: u64) -> Result<()> {
     // We must read current inheritable, add our caps, and set it back
     let mut inheritable = caps::read(None, CapSet::Inheritable)?;
     inheritable.extend(to_raise.iter().cloned());
-    caps::set(None, CapSet::Inheritable, &inheritable).context("Failed to set Inheritable capabilities")?;
+    caps::set(None, CapSet::Inheritable, &inheritable)
+        .context("Failed to set Inheritable capabilities")?;
 
     // 3. Add to Ambient
     // Loop and raise each one
@@ -274,7 +286,7 @@ fn apply_capabilities(mask: u64) -> Result<()> {
             return Err(e.into());
         }
     }
-    
+
     info!("Ambient capabilities set successfully");
     Ok(())
 }

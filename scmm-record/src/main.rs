@@ -177,8 +177,9 @@ fn run(args: Args, running: Arc<AtomicBool>) -> Result<()> {
     }
 
     // Load eBPF programs and start recording
-    let mut recorder = loader::Recorder::new(&args.output, args.category_filter(), args.follow_forks)
-        .context("Failed to initialize recorder")?;
+    let mut recorder =
+        loader::Recorder::new(&args.output, args.category_filter(), args.follow_forks)
+            .context("Failed to initialize recorder")?;
 
     // Spawn the target process
     let child_pid = recorder

@@ -99,10 +99,7 @@ fn run(args: Args) -> Result<()> {
     let mut out_file = File::create(&args.output).context("Failed to create output file")?;
     out_file.write_all(&compiled)?;
 
-    info!(
-        "Compilation complete: {} bytes",
-        compiled.len()
-    );
+    info!("Compilation complete: {} bytes", compiled.len());
     println!("Policy compiled successfully: {}", args.output.display());
     println!("Use 'scmm-enforce' to run a program with this policy.");
 

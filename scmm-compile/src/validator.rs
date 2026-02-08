@@ -35,7 +35,10 @@ pub fn validate(policy: &YamlPolicy, arch: &str) -> Result<Vec<String>> {
 
     // Check architecture
     if arch != "x86_64" && arch != "aarch64" {
-        bail!("Unsupported architecture: {}. Supported: x86_64, aarch64", arch);
+        bail!(
+            "Unsupported architecture: {}. Supported: x86_64, aarch64",
+            arch
+        );
     }
 
     // Check for unknown syscalls
@@ -61,7 +64,8 @@ pub fn validate(policy: &YamlPolicy, arch: &str) -> Result<Vec<String>> {
     }
 
     // Check for conflicting rules
-    let mut seen_syscalls: std::collections::HashMap<&str, Action> = std::collections::HashMap::new();
+    let mut seen_syscalls: std::collections::HashMap<&str, Action> =
+        std::collections::HashMap::new();
     for rule in &policy.syscalls {
         if let Some(&prev_action) = seen_syscalls.get(rule.name.as_str()) {
             if prev_action != rule.action && rule.constraints.is_empty() {
@@ -173,10 +177,7 @@ pub fn validate(policy: &YamlPolicy, arch: &str) -> Result<Vec<String>> {
             warnings.push("Empty path in filesystem rule".to_string());
         }
         if rule.access.is_empty() {
-            warnings.push(format!(
-                "No access types specified for path: {}",
-                rule.path
-            ));
+            warnings.push(format!("No access types specified for path: {}", rule.path));
         }
     }
 

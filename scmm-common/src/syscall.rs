@@ -1,6 +1,6 @@
 //! Syscall event definitions shared between eBPF and userspace
 
-use crate::{MAX_ARG_STR_LEN, MAX_ARGS, MAX_PATH_LEN};
+use crate::{MAX_ARGS, MAX_ARG_STR_LEN, MAX_PATH_LEN};
 
 #[cfg(not(feature = "no_std"))]
 use serde::{Deserialize, Serialize};
@@ -246,4 +246,3 @@ pub mod ring_event_type {
     pub const PROCESS_EXEC: u8 = 3;
     pub const PROCESS_EXIT: u8 = 4;
 }
-
