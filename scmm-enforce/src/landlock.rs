@@ -173,7 +173,7 @@ pub fn apply(policy: &LoadedPolicy) -> Result<()> {
             info!("Landlock fully enforced");
         }
         landlock::RulesetStatus::PartiallyEnforced => {
-            warn!("Landlock only partially enforced - some rules may not work");
+            info!("Landlock partially enforced (some access types unsupported by kernel ABI)");
         }
         landlock::RulesetStatus::NotEnforced => {
             warn!("Landlock not enforced - kernel may be too old");

@@ -5,3 +5,6 @@
 *.scmm-cap
 *.scmm-pol
 *policy*.yaml
+
+# Used in tests of touch, i.e. touch x
+x

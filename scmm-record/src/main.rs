@@ -168,10 +168,12 @@ fn run(args: Args, running: Arc<AtomicBool>) -> Result<()> {
         }
     );
 
-    // Check for root/CAP_BPF
-    if !nix::unistd::geteuid().is_root() {
-        warn!("Running without root privileges - eBPF loading may fail");
-        warn!("Consider running with sudo or granting CAP_BPF capability");
+    // Check for root or CAP_BPF
+    if !nix::unistd::geteuid().is_root()
+        && !caps::has_cap(None, caps::CapSet::Effective, caps::Capability::CAP_BPF).unwrap_or(false)
+    {
+        warn!("Running without root or CAP_BPF - eBPF loading may fail");
+        warn!("Consider running with sudo or: setcap cap_bpf,cap_perfmon,cap_dac_read_search=ep <binary>");
     }
 
     // Load eBPF programs and start recording

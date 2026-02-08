@@ -853,6 +853,7 @@ dependencies = [
  "anyhow",
  "aya",
  "byteorder",
+ "caps",
  "clap",
  "ctrlc",
  "gethostname",
