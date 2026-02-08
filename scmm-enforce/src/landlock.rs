@@ -183,6 +183,23 @@ pub fn apply(policy: &LoadedPolicy) -> Result<()> {
     Ok(())
 }
 
+/// Access rights that Landlock checks on the parent directory, not the file itself.
+/// For example, unlink() requires REMOVE_FILE on the parent, creat() requires MAKE_REG
+/// on the parent. When a policy grants these on a specific file path, we must also
+/// grant them on the parent directory.
+const PARENT_DIR_RIGHTS: &[AccessFs] = &[
+    AccessFs::RemoveFile,
+    AccessFs::RemoveDir,
+    AccessFs::MakeReg,
+    AccessFs::MakeDir,
+    AccessFs::MakeSock,
+    AccessFs::MakeFifo,
+    AccessFs::MakeBlock,
+    AccessFs::MakeChar,
+    AccessFs::MakeSym,
+    AccessFs::Refer,
+];
+
 fn add_path_rule(
     ruleset: &mut landlock::RulesetCreated,
     path: &str,
@@ -190,12 +207,34 @@ fn add_path_rule(
 ) -> Result<bool> {
     let expanded_path = expand_path(path);
 
+    // Collect rights that need to be granted on the parent directory
+    let mut parent_rights = BitFlags::<AccessFs>::empty();
+    for &right in PARENT_DIR_RIGHTS {
+        if access.contains(right) {
+            parent_rights |= right;
+        }
+    }
+
     // Try the exact path first
     match PathFd::new(&expanded_path) {
         Ok(path_fd) => {
             ruleset
                 .add_rule(PathBeneath::new(path_fd, access).set_compatibility(CompatLevel::BestEffort))
                 .context("Failed to add path rule")?;
+
+            // Grant parent-directory rights on the parent if needed
+            if !parent_rights.is_empty() {
+                let p = Path::new(&expanded_path);
+                if let Some(parent) = p.parent() {
+                    if let Ok(parent_fd) = PathFd::new(&*parent.to_string_lossy()) {
+                        let _ = ruleset.add_rule(
+                            PathBeneath::new(parent_fd, parent_rights)
+                                .set_compatibility(CompatLevel::BestEffort),
+                        );
+                    }
+                }
+            }
+
             Ok(true)
         }
         Err(_) => {

@@ -304,6 +304,8 @@ struct FileAccessInfo {
     has_write_open: bool,
     /// Whether any openat/open call used O_CREAT
     has_create_open: bool,
+    /// Whether any openat/open call used O_TRUNC
+    has_trunc_open: bool,
 }
 
 /// Normalize a path by resolving `.` and `..` components without touching the filesystem.
@@ -327,11 +329,12 @@ fn normalize_path(path: &str) -> String {
 const O_WRONLY: u64 = 0x1;
 const O_RDWR: u64 = 0x2;
 const O_CREAT: u64 = 0x40;
+const O_TRUNC: u64 = 0x200;
 
 /// Extract file paths from capture events
 fn extract_file_paths(capture: &ParsedCapture) -> Vec<FileAccessInfo> {
-    // Collect (path, syscall_nr) -> (count, has_write_open, has_create_open)
-    let mut path_map: HashMap<(String, u32), (usize, bool, bool)> = HashMap::new();
+    // Collect (path, syscall_nr) -> (count, has_write_open, has_create_open, has_trunc_open)
+    let mut path_map: HashMap<(String, u32), (usize, bool, bool, bool)> = HashMap::new();
 
     let working_dir = &capture.metadata.working_dir;
 
@@ -369,20 +372,22 @@ fn extract_file_paths(capture: &ParsedCapture) -> Vec<FileAccessInfo> {
                     };
                     let is_write = (flags_val & O_WRONLY) != 0 || (flags_val & O_RDWR) != 0;
                     let is_create = (flags_val & O_CREAT) != 0;
+                    let is_trunc = (flags_val & O_TRUNC) != 0;
 
-                    let entry = path_map.entry((normalized, event.syscall_nr)).or_insert((0, false, false));
+                    let entry = path_map.entry((normalized, event.syscall_nr)).or_insert((0, false, false, false));
                     entry.0 += 1;
                     entry.1 |= is_write;
                     entry.2 |= is_create;
+                    entry.3 |= is_trunc;
                 }
             }
         }
     }
 
     // Group by path
-    let mut by_path: HashMap<String, (Vec<String>, usize, bool, bool)> = HashMap::new();
-    for ((path, nr), (count, write_open, create_open)) in path_map {
-        let entry = by_path.entry(path).or_insert_with(|| (Vec::new(), 0, false, false));
+    let mut by_path: HashMap<String, (Vec<String>, usize, bool, bool, bool)> = HashMap::new();
+    for ((path, nr), (count, write_open, create_open, trunc_open)) in path_map {
+        let entry = by_path.entry(path).or_insert_with(|| (Vec::new(), 0, false, false, false));
         let name = syscalls::get_name(nr).to_string();
         if !entry.0.contains(&name) {
             entry.0.push(name);
@@ -390,16 +395,18 @@ fn extract_file_paths(capture: &ParsedCapture) -> Vec<FileAccessInfo> {
         entry.1 += count;
         entry.2 |= write_open;
         entry.3 |= create_open;
+        entry.4 |= trunc_open;
     }
 
     let mut results: Vec<FileAccessInfo> = by_path
         .into_iter()
-        .map(|(path, (syscall_names, count, has_write_open, has_create_open))| FileAccessInfo {
+        .map(|(path, (syscall_names, count, has_write_open, has_create_open, has_trunc_open))| FileAccessInfo {
             path,
             syscall_names,
             count,
             has_write_open,
             has_create_open,
+            has_trunc_open,
         })
         .collect();
 
@@ -448,6 +455,7 @@ fn infer_access_rights_with_flags(
     path: &str,
     has_write_open: bool,
     has_create_open: bool,
+    has_trunc_open: bool,
 ) -> Vec<String> {
     let mut rights = std::collections::HashSet::new();
 
@@ -518,6 +526,9 @@ fn infer_access_rights_with_flags(
         rights.insert(landlock_access::MAKE_REG);
         rights.insert(landlock_access::WRITE_FILE);
     }
+    if has_trunc_open {
+        rights.insert(landlock_access::TRUNCATE);
+    }
 
     // Directory rules (glob patterns like /foo/**) need read_dir, execute,
     // and make_reg so that the kernel allows traversal and file creation.
@@ -580,7 +591,8 @@ fn collect_group_rights(group: &[&FileAccessInfo], is_directory_rule: bool, patt
         .collect();
     let has_write = group.iter().any(|info| info.has_write_open);
     let has_create = group.iter().any(|info| info.has_create_open);
-    infer_access_rights_with_flags(&all_syscalls, is_directory_rule, pattern, has_write, has_create)
+    let has_trunc = group.iter().any(|info| info.has_trunc_open);
+    infer_access_rights_with_flags(&all_syscalls, is_directory_rule, pattern, has_write, has_create, has_trunc)
 }
 
 /// Process file paths interactively with per-path subtree choices
@@ -753,7 +765,7 @@ fn process_file_paths(policy: &mut YamlPolicy, file_accesses: &[FileAccessInfo])
             let is_dir = final_pattern.contains("**") || final_pattern.ends_with("/*");
             let access = infer_access_rights_with_flags(
                 &info.syscall_names, is_dir, &final_pattern,
-                info.has_write_open, info.has_create_open,
+                info.has_write_open, info.has_create_open, info.has_trunc_open,
             );
 
             policy.filesystem.rules.push(FilesystemRule {

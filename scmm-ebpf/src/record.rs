@@ -3,7 +3,7 @@
 use aya_ebpf::{
     helpers::{bpf_get_current_pid_tgid, bpf_ktime_get_ns, bpf_probe_read_user_str_bytes},
     macros::map,
-    maps::{HashMap, RingBuf},
+    maps::{Array, HashMap, RingBuf},
     programs::TracePointContext,
 };
 use scmm_common::{RingBufEvent, ring_event_type, MAX_ARGS};
@@ -15,6 +15,10 @@ static EVENTS: RingBuf = RingBuf::with_byte_size(1024 * 1024, 0);
 /// Map of PIDs we're tracing (key: pid, value: 1 if active)
 #[map]
 static TARGET_PIDS: HashMap<u32, u8> = HashMap::with_max_entries(1024, 0);
+
+/// Configuration array: index 0 = follow_forks (0 or 1)
+#[map]
+static CONFIG: Array<u32> = Array::with_max_entries(1, 0);
 
 /// Returns the argument index (0-5) that contains a path pointer for this syscall,
 /// or 255 if no path argument. x86_64 syscall numbers.
@@ -139,13 +143,29 @@ pub fn handle_sys_exit(ctx: TracePointContext) -> Result<(), i64> {
     let syscall_nr: i64 = unsafe { ctx.read_at(8).map_err(|_| 1i64)? };
     let ret_val: i64 = unsafe { ctx.read_at(16).map_err(|_| 1i64)? };
 
+    let nr = syscall_nr as u32;
+
+    // Kernel-side fork following: when a tracked process calls clone/fork/vfork/clone3,
+    // immediately add the child PID to TARGET_PIDS so its very first syscalls are captured.
+    // This eliminates the race condition of userspace adding the PID too late.
+    if ret_val > 0 && (nr == 56 || nr == 57 || nr == 58 || nr == 435) {
+        // clone=56, fork=57, vfork=58, clone3=435
+        let follow = CONFIG.get(0);
+        if let Some(&val) = follow {
+            if val != 0 {
+                let child_pid = ret_val as u32;
+                let _ = TARGET_PIDS.insert(&child_pid, &1u8, 0);
+            }
+        }
+    }
+
     // Write directly into ring buffer reserved slot
     if let Some(mut entry) = EVENTS.reserve::<RingBufEvent>(0) {
         let ptr = entry.as_mut_ptr();
         unsafe {
             (*ptr).event_type = ring_event_type::SYSCALL_EXIT;
             (*ptr)._pad = [0; 3];
-            (*ptr).syscall_nr = syscall_nr as u32;
+            (*ptr).syscall_nr = nr;
             (*ptr).timestamp_ns = bpf_ktime_get_ns();
             (*ptr).pid = pid;
             (*ptr).tid = tid;

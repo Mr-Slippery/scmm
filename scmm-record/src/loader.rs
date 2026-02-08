@@ -10,7 +10,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 #[cfg(debug_assertions)]
 use aya::include_bytes_aligned;
-use aya::maps::{HashMap as AyaHashMap, RingBuf};
+use aya::maps::{Array as AyaArray, HashMap as AyaHashMap, RingBuf};
 use aya::programs::TracePoint;
 use aya::Bpf;
 use tracing::{debug, info, trace, warn};
@@ -132,6 +132,9 @@ impl Recorder {
         use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
         use nix::unistd::{execvp, fork, ForkResult};
 
+        // Set follow-forks config in eBPF before attaching
+        self.set_config()?;
+
         // Attach tracepoints before spawning
         self.attach_tracepoints()?;
 
@@ -189,6 +192,17 @@ impl Recorder {
                 Ok(pid)
             }
         }
+    }
+
+    /// Set eBPF configuration (follow_forks flag)
+    fn set_config(&mut self) -> Result<()> {
+        let map = self.bpf.map_mut("CONFIG")
+            .ok_or_else(|| anyhow::anyhow!("CONFIG map not found"))?;
+        let mut config: AyaArray<_, u32> = AyaArray::try_from(map)?;
+        let val: u32 = if self.follow_forks { 1 } else { 0 };
+        config.set(0, val, 0)?;
+        info!("eBPF config: follow_forks={}", self.follow_forks);
+        Ok(())
     }
 
     /// Attach to tracepoints
@@ -318,6 +332,12 @@ impl Recorder {
 
     /// Handle a single event from the ring buffer
     fn handle_event(&mut self, event: &RingBufEvent) -> Result<()> {
+        // Skip bogus syscall numbers. The kernel can emit sys_exit with id=-1
+        // (cast to u32 = 0xFFFFFFFF or 0xFFFF) for interrupted/restarted syscalls.
+        if event.syscall_nr > 1000 {
+            return Ok(());
+        }
+
         // Check category filter
         let category = syscalls::get_category(event.syscall_nr);
         if !self.category_filter.contains(category) {
