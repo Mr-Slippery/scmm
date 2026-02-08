@@ -249,6 +249,10 @@ struct FileAccessInfo {
     syscall_names: Vec<String>,
     /// Total number of accesses
     count: usize,
+    /// Whether any openat/open call used write flags (O_WRONLY, O_RDWR)
+    has_write_open: bool,
+    /// Whether any openat/open call used O_CREAT
+    has_create_open: bool,
 }
 
 /// Normalize a path by resolving `.` and `..` components without touching the filesystem.
@@ -268,10 +272,15 @@ fn normalize_path(path: &str) -> String {
     }
 }
 
+/// Open flag constants (x86_64)
+const O_WRONLY: u64 = 0x1;
+const O_RDWR: u64 = 0x2;
+const O_CREAT: u64 = 0x40;
+
 /// Extract file paths from capture events
 fn extract_file_paths(capture: &ParsedCapture) -> Vec<FileAccessInfo> {
-    // Collect (path, syscall_nr) -> count
-    let mut path_map: HashMap<(String, u32), usize> = HashMap::new();
+    // Collect (path, syscall_nr) -> (count, has_write_open, has_create_open)
+    let mut path_map: HashMap<(String, u32), (usize, bool, bool)> = HashMap::new();
 
     let working_dir = &capture.metadata.working_dir;
 
@@ -298,29 +307,48 @@ fn extract_file_paths(capture: &ParsedCapture) -> Vec<FileAccessInfo> {
                         continue;
                     }
 
-                    *path_map.entry((normalized, event.syscall_nr)).or_insert(0) += 1;
+                    // Detect open flags for openat/open/openat2
+                    // openat: arg0=dirfd, arg1=path, arg2=flags
+                    // open:   arg0=path, arg1=flags
+                    let name = syscalls::get_name(event.syscall_nr);
+                    let flags_val = match name {
+                        "openat" | "openat2" => event.args[2].raw_value,
+                        "open" => event.args[1].raw_value,
+                        _ => 0,
+                    };
+                    let is_write = (flags_val & O_WRONLY) != 0 || (flags_val & O_RDWR) != 0;
+                    let is_create = (flags_val & O_CREAT) != 0;
+
+                    let entry = path_map.entry((normalized, event.syscall_nr)).or_insert((0, false, false));
+                    entry.0 += 1;
+                    entry.1 |= is_write;
+                    entry.2 |= is_create;
                 }
             }
         }
     }
 
     // Group by path
-    let mut by_path: HashMap<String, (Vec<String>, usize)> = HashMap::new();
-    for ((path, nr), count) in path_map {
-        let entry = by_path.entry(path).or_insert_with(|| (Vec::new(), 0));
+    let mut by_path: HashMap<String, (Vec<String>, usize, bool, bool)> = HashMap::new();
+    for ((path, nr), (count, write_open, create_open)) in path_map {
+        let entry = by_path.entry(path).or_insert_with(|| (Vec::new(), 0, false, false));
         let name = syscalls::get_name(nr).to_string();
         if !entry.0.contains(&name) {
             entry.0.push(name);
         }
         entry.1 += count;
+        entry.2 |= write_open;
+        entry.3 |= create_open;
     }
 
     let mut results: Vec<FileAccessInfo> = by_path
         .into_iter()
-        .map(|(path, (syscall_names, count))| FileAccessInfo {
+        .map(|(path, (syscall_names, count, has_write_open, has_create_open))| FileAccessInfo {
             path,
             syscall_names,
             count,
+            has_write_open,
+            has_create_open,
         })
         .collect();
 
@@ -362,10 +390,14 @@ fn build_subtree_choices(path: &str) -> Vec<(String, String)> {
     choices
 }
 
-/// Infer Landlock access rights from observed syscall names.
-/// If `is_directory_rule` is true (e.g. pattern ends with `/**`), also grant
-/// read_dir and execute so directory traversal works.
-fn infer_access_rights(syscall_names: &[String], is_directory_rule: bool) -> Vec<String> {
+/// Infer Landlock access rights from observed syscall names, path, and open flags.
+fn infer_access_rights_with_flags(
+    syscall_names: &[String],
+    is_directory_rule: bool,
+    path: &str,
+    has_write_open: bool,
+    has_create_open: bool,
+) -> Vec<String> {
     let mut rights = std::collections::HashSet::new();
 
     for name in syscall_names {
@@ -396,6 +428,13 @@ fn infer_access_rights(syscall_names: &[String], is_directory_rule: bool) -> Vec
             "rename" | "renameat" | "renameat2" => {
                 rights.insert(landlock_access::REFER);
             }
+            "write" | "pwrite64" | "writev" | "pwritev" | "pwritev2"
+            | "sendfile" | "fallocate" | "ftruncate" => {
+                rights.insert(landlock_access::WRITE_FILE);
+            }
+            "utimensat" | "futimesat" | "utime" | "utimes" => {
+                rights.insert(landlock_access::WRITE_FILE);
+            }
             "chmod" | "fchmodat" | "chown" | "lchown" | "fchownat" => {
                 rights.insert(landlock_access::WRITE_FILE);
             }
@@ -404,6 +443,7 @@ fn infer_access_rights(syscall_names: &[String], is_directory_rule: bool) -> Vec
             }
             "execve" | "execveat" => {
                 rights.insert(landlock_access::EXECUTE);
+                rights.insert(landlock_access::READ_FILE);
             }
             "link" | "linkat" | "symlink" | "symlinkat" => {
                 rights.insert(landlock_access::MAKE_SYM);
@@ -418,10 +458,28 @@ fn infer_access_rights(syscall_names: &[String], is_directory_rule: bool) -> Vec
         }
     }
 
-    // Directory rules (glob patterns like /foo/**) need read_dir and execute
-    // so that the kernel allows traversal into the directory hierarchy.
+    // If openat/open was called with write or create flags, grant
+    // write_file / make_reg so Landlock allows the operation.
+    if has_write_open {
+        rights.insert(landlock_access::WRITE_FILE);
+    }
+    if has_create_open {
+        rights.insert(landlock_access::MAKE_REG);
+        rights.insert(landlock_access::WRITE_FILE);
+    }
+
+    // Directory rules (glob patterns like /foo/**) need read_dir, execute,
+    // and make_reg so that the kernel allows traversal and file creation.
     if is_directory_rule {
         rights.insert(landlock_access::READ_DIR);
+        rights.insert(landlock_access::EXECUTE);
+        rights.insert(landlock_access::MAKE_REG);
+    }
+
+    // Shared libraries need execute access because the dynamic linker
+    // mmap's them with PROT_EXEC. The mmap syscall uses an fd (not a path),
+    // so the path-based capture can't see that — we infer it from the filename.
+    if path.contains(".so") {
         rights.insert(landlock_access::EXECUTE);
     }
 
@@ -464,12 +522,14 @@ fn group_by_top_dir(file_accesses: &[FileAccessInfo]) -> Vec<(String, Vec<&FileA
 }
 
 /// Collect all access rights from a group of file accesses
-fn collect_group_rights(group: &[&FileAccessInfo], is_directory_rule: bool) -> Vec<String> {
+fn collect_group_rights(group: &[&FileAccessInfo], is_directory_rule: bool, pattern: &str) -> Vec<String> {
     let all_syscalls: Vec<String> = group
         .iter()
         .flat_map(|info| info.syscall_names.iter().cloned())
         .collect();
-    infer_access_rights(&all_syscalls, is_directory_rule)
+    let has_write = group.iter().any(|info| info.has_write_open);
+    let has_create = group.iter().any(|info| info.has_create_open);
+    infer_access_rights_with_flags(&all_syscalls, is_directory_rule, pattern, has_write, has_create)
 }
 
 /// Process file paths interactively with per-path subtree choices
@@ -563,7 +623,7 @@ fn process_file_paths(policy: &mut YamlPolicy, file_accesses: &[FileAccessInfo])
                     } else {
                         format!("{}/**", top_dir)
                     };
-                    let access = collect_group_rights(group, true);
+                    let access = collect_group_rights(group, true, &pattern);
                     policy.filesystem.rules.push(FilesystemRule {
                         path: pattern.clone(),
                         access,
@@ -577,7 +637,7 @@ fn process_file_paths(policy: &mut YamlPolicy, file_accesses: &[FileAccessInfo])
                         .with_prompt("Enter pattern (use * for wildcard, ** for recursive)")
                         .interact_text()?;
                     let is_dir = custom.contains("**") || custom.ends_with("/*");
-                    let access = collect_group_rights(group, is_dir);
+                    let access = collect_group_rights(group, is_dir, &custom);
                     policy.filesystem.rules.push(FilesystemRule {
                         path: custom.clone(),
                         access,
@@ -640,7 +700,10 @@ fn process_file_paths(policy: &mut YamlPolicy, file_accesses: &[FileAccessInfo])
             };
 
             let is_dir = final_pattern.contains("**") || final_pattern.ends_with("/*");
-            let access = infer_access_rights(&info.syscall_names, is_dir);
+            let access = infer_access_rights_with_flags(
+                &info.syscall_names, is_dir, &final_pattern,
+                info.has_write_open, info.has_create_open,
+            );
 
             policy.filesystem.rules.push(FilesystemRule {
                 path: final_pattern.clone(),

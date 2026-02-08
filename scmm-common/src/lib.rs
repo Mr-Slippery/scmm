@@ -9,6 +9,8 @@ pub mod syscall;
 pub mod capture;
 pub mod policy;
 pub mod categories;
+#[cfg(not(feature = "no_std"))]
+pub mod flags;
 
 pub use syscall::*;
 pub use capture::*;

@@ -845,6 +845,7 @@ dependencies = [
  "clap",
  "ctrlc",
  "gethostname",
+ "libc",
  "nix 0.28.0",
  "scmm-common",
  "serde",

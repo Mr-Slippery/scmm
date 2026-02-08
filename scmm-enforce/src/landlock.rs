@@ -1,5 +1,6 @@
 //! Landlock enforcement
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -48,6 +49,88 @@ pub fn apply(policy: &LoadedPolicy) -> Result<()> {
 
     let mut ruleset_created = ruleset.create().context("Failed to create Landlock ruleset")?;
 
+    // Phase 1: Collect all expanded paths to compute ancestor directories
+    let mut ancestor_dirs: HashSet<String> = HashSet::new();
+    for rule in policy.landlock_rules.iter() {
+        if rule.rule_type != 1 {
+            continue;
+        }
+        if let Some(path) = policy.paths.get(rule.path_or_port as usize) {
+            let expanded = expand_path(path);
+            // Collect all ancestor directories for directory traversal
+            let p = Path::new(&expanded);
+            let mut current = p.parent();
+            while let Some(dir) = current {
+                let dir_str = dir.to_string_lossy().to_string();
+                if dir_str.is_empty() || !ancestor_dirs.insert(dir_str) {
+                    break; // Already processed this ancestor
+                }
+                current = dir.parent();
+            }
+        }
+    }
+
+    // Phase 2: Add directory traversal rules for all ancestor directories
+    // Landlock requires execute (search) access on directories to traverse them
+    let traverse_access = AccessFs::Execute | AccessFs::ReadDir;
+    let mut sorted_ancestors: Vec<&str> = ancestor_dirs.iter().map(|s| s.as_str()).collect();
+    sorted_ancestors.sort();
+    if !sorted_ancestors.is_empty() {
+        info!("Adding directory traversal rules:");
+        for dir in &sorted_ancestors {
+            match PathFd::new(dir) {
+                Ok(path_fd) => {
+                    match (&mut ruleset_created).add_rule(
+                        PathBeneath::new(path_fd, traverse_access)
+                            .set_compatibility(CompatLevel::BestEffort),
+                    ) {
+                        Ok(_) => debug!("  traverse {}", dir),
+                        Err(e) => warn!("  FAIL traverse {}: {}", dir, e),
+                    }
+                }
+                Err(_) => debug!("  skip traverse {} (does not exist)", dir),
+            }
+        }
+    }
+
+    // Phase 2b: Add implicit rules for the ELF interpreter (dynamic linker).
+    // When execve runs a dynamically-linked binary, the kernel internally opens
+    // the ELF interpreter (e.g. /lib64/ld-linux-x86-64.so.2). This access is
+    // invisible to the eBPF recorder but checked by Landlock. Without this rule,
+    // execve returns EACCES even though the binary itself is allowed.
+    let elf_interp_access = AccessFs::Execute | AccessFs::ReadFile;
+    for interp_path in &[
+        "/lib64/ld-linux-x86-64.so.2",
+        "/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+        "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+    ] {
+        if let Ok(real) = std::fs::canonicalize(interp_path) {
+            let real_str = real.to_string_lossy();
+            if let Ok(path_fd) = PathFd::new(real_str.as_ref()) {
+                match (&mut ruleset_created).add_rule(
+                    PathBeneath::new(path_fd, elf_interp_access)
+                        .set_compatibility(CompatLevel::BestEffort),
+                ) {
+                    Ok(_) => {
+                        info!("  implicit: allow {} [execute, read_file] (ELF interpreter)", real_str);
+                        // Also add traversal for the interpreter's directory
+                        if let Some(parent) = real.parent() {
+                            if let Ok(dir_fd) = PathFd::new(&*parent.to_string_lossy()) {
+                                let _ = (&mut ruleset_created).add_rule(
+                                    PathBeneath::new(dir_fd, traverse_access)
+                                        .set_compatibility(CompatLevel::BestEffort),
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => warn!("  FAIL implicit {}: {}", real_str, e),
+                }
+                break; // Only need to add it once (all paths resolve to the same file)
+            }
+        }
+    }
+
+    // Phase 3: Apply the actual policy rules
     info!("Applying {} Landlock filesystem rule(s):", policy.landlock_rules.len());
     for rule in policy.landlock_rules.iter() {
         if rule.rule_type != 1 {
@@ -107,18 +190,51 @@ fn add_path_rule(
 ) -> Result<bool> {
     let expanded_path = expand_path(path);
 
-    if !Path::new(&expanded_path).exists() {
-        debug!("Path does not exist, skipping: {}", expanded_path);
-        return Ok(false);
+    // Try the exact path first
+    match PathFd::new(&expanded_path) {
+        Ok(path_fd) => {
+            ruleset
+                .add_rule(PathBeneath::new(path_fd, access).set_compatibility(CompatLevel::BestEffort))
+                .context("Failed to add path rule")?;
+            Ok(true)
+        }
+        Err(_) => {
+            // Path doesn't exist — find nearest existing ancestor and apply rule there.
+            // This is correct for Landlock: PathBeneath grants access to everything
+            // beneath the given path, so using the parent directory covers the
+            // not-yet-created file. We also add make_reg so the file can be created.
+            let ancestor_access = access | AccessFs::MakeReg | AccessFs::WriteFile;
+            let p = Path::new(&expanded_path);
+            let mut ancestor = p.parent();
+            while let Some(dir) = ancestor {
+                if dir.exists() {
+                    let dir_str = dir.to_string_lossy();
+                    match PathFd::new(dir_str.as_ref()) {
+                        Ok(path_fd) => {
+                            ruleset
+                                .add_rule(
+                                    PathBeneath::new(path_fd, ancestor_access)
+                                        .set_compatibility(CompatLevel::BestEffort),
+                                )
+                                .context("Failed to add path rule on ancestor")?;
+                            info!(
+                                "  (path {} does not exist, applied rule on ancestor {})",
+                                expanded_path, dir_str
+                            );
+                            return Ok(true);
+                        }
+                        Err(_) => {
+                            ancestor = dir.parent();
+                        }
+                    }
+                } else {
+                    ancestor = dir.parent();
+                }
+            }
+            // No ancestor found — skip
+            Ok(false)
+        }
     }
-
-    let path_fd = PathFd::new(&expanded_path).context("Failed to open path")?;
-
-    ruleset
-        .add_rule(PathBeneath::new(path_fd, access).set_compatibility(CompatLevel::BestEffort))
-        .context("Failed to add path rule")?;
-
-    Ok(true)
 }
 
 fn bitmap_to_access_fs(bitmap: u64) -> BitFlags<AccessFs> {

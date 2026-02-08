@@ -1,8 +1,8 @@
 //! eBPF program loader and event handler
 
 use std::collections::HashMap;
+use std::ffi::CString;
 use std::path::Path;
-use std::process::{Child, Command};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -63,8 +63,8 @@ pub struct Recorder {
     event_count: u64,
     /// Pending entry events (pid,tid -> event) for matching with exits
     pending_entries: HashMap<(u32, u32, u32), RingBufEvent>,
-    /// Child process handle (kept to allow proper wait)
-    child: Option<Child>,
+    /// Child PID (kept for reaping)
+    child_pid: Option<u32>,
 }
 
 impl Recorder {
@@ -114,57 +114,81 @@ impl Recorder {
             tracked_pids: HashMap::new(),
             event_count: 0,
             pending_entries: HashMap::new(),
-            child: None,
+            child_pid: None,
         })
     }
 
     /// Spawn a command and start tracing it
+    ///
+    /// Uses manual fork+exec instead of std::process::Command to avoid a hang:
+    /// Rust's Command::spawn() has an internal error-reporting pipe that blocks
+    /// until the child either execs or reports an error. If the child stops
+    /// (SIGSTOP) before exec, the pipe stays open and spawn() hangs forever.
+    ///
+    /// With manual fork: child raises SIGSTOP, parent waitpid(WUNTRACED) sees
+    /// the stop, adds PID to TARGET_PIDS, then SIGCONT resumes the child into
+    /// execvp. This guarantees the eBPF tracer sees the execve syscall.
     pub fn spawn_command(&mut self, command: &[String]) -> Result<u32> {
         use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
+        use nix::unistd::{execvp, fork, ForkResult};
 
         // Attach tracepoints before spawning
         self.attach_tracepoints()?;
 
-        // Fork and exec the command
-        // The child will SIGSTOP itself immediately after exec so we can set up tracing
-        let child = Command::new(&command[0])
-            .args(&command[1..])
-            .spawn()
-            .context("Failed to spawn command")?;
+        // Prepare C strings for execvp before forking
+        let c_args: Vec<CString> = command
+            .iter()
+            .map(|s| CString::new(s.as_str()).context("Invalid argument string"))
+            .collect::<Result<Vec<_>>>()?;
+        let c_arg_refs: Vec<&std::ffi::CStr> = c_args.iter().map(|s| s.as_c_str()).collect();
 
-        let pid = child.id();
-        let nix_pid = nix::unistd::Pid::from_raw(pid as i32);
+        // SAFETY: Between fork and exec in the child, only async-signal-safe
+        // functions are called (raise, execvp, _exit).
+        match unsafe { fork() }.context("fork() failed")? {
+            ForkResult::Child => {
+                // Stop ourselves BEFORE execve so parent can add our PID to
+                // TARGET_PIDS. Parent will SIGCONT us once tracing is set up.
+                let _ = nix::sys::signal::raise(nix::sys::signal::Signal::SIGSTOP);
 
-        // Stop the child immediately so we can set up tracing before it runs
-        nix::sys::signal::kill(nix_pid, nix::sys::signal::Signal::SIGSTOP)?;
+                // Now exec the target command
+                let _ = execvp(c_arg_refs[0], &c_arg_refs);
 
-        // Wait for the child to actually stop
-        match waitpid(nix_pid, Some(WaitPidFlag::WUNTRACED)) {
-            Ok(WaitStatus::Stopped(_, _)) => {
-                debug!("Child {} stopped, setting up tracing", pid);
+                // If exec failed, exit immediately (async-signal-safe)
+                unsafe { libc::_exit(127) };
             }
-            Ok(status) => {
-                warn!("Unexpected wait status: {:?}", status);
-            }
-            Err(e) => {
-                warn!("waitpid error: {}", e);
+            ForkResult::Parent { child: nix_pid } => {
+                let pid = nix_pid.as_raw() as u32;
+
+                // Wait for the child to stop (it raised SIGSTOP before exec)
+                match waitpid(nix_pid, Some(WaitPidFlag::WUNTRACED)) {
+                    Ok(WaitStatus::Stopped(_, _)) => {
+                        debug!("Child {} stopped before exec, setting up tracing", pid);
+                    }
+                    Ok(status) => {
+                        warn!("Unexpected wait status for child {}: {:?}", pid, status);
+                    }
+                    Err(e) => {
+                        warn!("waitpid error for child {}: {}", pid, e);
+                    }
+                }
+
+                // Add PID to tracking map BEFORE resuming the child.
+                // Now when the child runs execve, the eBPF will see it.
+                self.add_pid(pid)?;
+                self.tracked_pids.insert(pid, true);
+
+                // Store command in capture metadata
+                self.writer.set_command(command.to_vec());
+
+                // Store child PID for reaping
+                self.child_pid = Some(pid);
+
+                // Resume the child - it will now call execve with tracing active
+                nix::sys::signal::kill(nix_pid, nix::sys::signal::Signal::SIGCONT)?;
+
+                Ok(pid)
             }
         }
-
-        // Add PID to tracking map
-        self.add_pid(pid)?;
-        self.tracked_pids.insert(pid, true);
-
-        // Store command in capture metadata
-        self.writer.set_command(command.to_vec());
-
-        // Store child handle to prevent premature drop
-        self.child = Some(child);
-
-        // Resume the child - now tracing is active
-        nix::sys::signal::kill(nix_pid, nix::sys::signal::Signal::SIGCONT)?;
-
-        Ok(pid)
     }
 
     /// Attach to tracepoints
@@ -238,15 +262,28 @@ impl Recorder {
                     ChildStatus::Exited(code) => {
                         info!("Root process {} exited with code {}", root_pid, code);
                         process_exited = true;
-                        // Don't break immediately - do one more drain
                     }
                     ChildStatus::Signaled(sig) => {
                         info!("Root process {} killed by signal {}", root_pid, sig);
                         process_exited = true;
                     }
                 }
-            } else {
-                // Process exited, do a final drain and exit
+            }
+
+            if process_exited {
+                // Process exited — drain remaining events from the ring buffer.
+                // The kernel may still be committing events after the process
+                // exits, so do multiple drain passes with small delays.
+                for drain_pass in 0..5 {
+                    std::thread::sleep(Duration::from_millis(5));
+                    let events = Self::collect_events(&mut ring_buf);
+                    if !events.is_empty() {
+                        debug!("Post-exit drain pass {}: {} events", drain_pass, events.len());
+                        for event in events {
+                            self.handle_event(&event)?;
+                        }
+                    }
+                }
                 break;
             }
 
@@ -256,9 +293,11 @@ impl Recorder {
 
         // Final drain of remaining events
         let events = Self::collect_events(&mut ring_buf);
-        debug!("Final drain: {} events", events.len());
-        for event in events {
-            self.handle_event(&event)?;
+        if !events.is_empty() {
+            debug!("Final drain: {} events", events.len());
+            for event in events {
+                self.handle_event(&event)?;
+            }
         }
 
         info!("Collected {} events", self.event_count);

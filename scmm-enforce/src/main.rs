@@ -112,7 +112,6 @@ fn run(args: Args) -> Result<ExitCode> {
                 );
             }
             landlock::apply(&policy)?;
-            apply_seccomp(&policy)?;
         }
         EnforcementMode::Standard => {
             if caps.landlock {
@@ -121,15 +120,17 @@ fn run(args: Args) -> Result<ExitCode> {
                 warn!("Landlock not available - path-based restrictions will not be enforced");
                 warn!("Consider upgrading to kernel 5.13+ for full protection");
             }
-            apply_seccomp(&policy)?;
         }
-        EnforcementMode::Seccomp => {
-            apply_seccomp(&policy)?;
-        }
+        EnforcementMode::Seccomp => {}
     }
 
-    // Execute the command
+    // All logging MUST happen before seccomp is applied. After the seccomp
+    // filter is installed, write/writev may be blocked, so any tracing or
+    // error reporting would crash the process.
     info!("Executing command...");
+    apply_seccomp(&policy)?;
+
+    // After this point, only execvp or _exit — no logging, no error formatting.
     exec_command(&args.command)
 }
 
@@ -168,15 +169,20 @@ fn check_landlock() -> bool {
     false
 }
 
-/// Apply seccomp filter
+/// Apply seccomp filter.
+///
+/// All logging happens BEFORE the filter is installed. After `apply_filter()`
+/// returns, write/writev may be blocked so no further I/O is safe.
 fn apply_seccomp(policy: &loader::LoadedPolicy) -> Result<()> {
     if policy.seccomp_filter.is_empty() {
         info!("No seccomp filter in policy");
         return Ok(());
     }
 
+    let insn_count = policy.seccomp_filter.len() / 8;
+    info!("Applying seccomp filter ({} instructions)", insn_count);
     seccomp::apply_filter(&policy.seccomp_filter)?;
-    info!("Seccomp filter applied");
+    // NO logging after this point — write() may be blocked
     Ok(())
 }
 
@@ -189,7 +195,10 @@ fn set_no_new_privs() -> Result<()> {
     Ok(())
 }
 
-/// Execute the command (replaces current process)
+/// Execute the command (replaces current process).
+///
+/// This runs AFTER seccomp is applied, so write/writev may be blocked.
+/// If execvp fails we cannot safely use formatting or eprintln — just _exit.
 fn exec_command(command: &[String]) -> Result<ExitCode> {
     let program = CString::new(command[0].as_bytes())?;
     let args: Vec<CString> = command
@@ -198,8 +207,9 @@ fn exec_command(command: &[String]) -> Result<ExitCode> {
         .collect();
 
     // Use execvp to search PATH
-    let err = nix::unistd::execvp(&program, &args);
+    let _err = nix::unistd::execvp(&program, &args);
 
-    // If we get here, exec failed
-    Err(anyhow::anyhow!("Failed to execute {}: {:?}", command[0], err))
+    // If we get here, exec failed. We cannot use eprintln/format! because
+    // write() may be blocked by seccomp. Exit with code 127 (command not found).
+    unsafe { libc::_exit(127) }
 }

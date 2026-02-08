@@ -76,6 +76,97 @@ pub fn validate(policy: &YamlPolicy, arch: &str) -> Result<Vec<String>> {
         }
     }
 
+    // Validate constraints
+    let constrained_names: std::collections::HashSet<&str> = policy
+        .syscalls
+        .iter()
+        .filter(|r| !r.constraints.is_empty())
+        .map(|r| r.name.as_str())
+        .collect();
+
+    for rule in &policy.syscalls {
+        // Warn if a syscall has both constrained and unconstrained rules
+        if rule.constraints.is_empty() && constrained_names.contains(rule.name.as_str()) {
+            warnings.push(format!(
+                "Syscall '{}' has both constrained and unconstrained rules. \
+                 The unconstrained rule will be ignored in favor of the constrained one.",
+                rule.name
+            ));
+        }
+
+        for (ci, constraint) in rule.constraints.iter().enumerate() {
+            // Validate arg index
+            match constraint.arg.parse::<u32>() {
+                Ok(idx) if idx <= 5 => {}
+                Ok(idx) => {
+                    warnings.push(format!(
+                        "Syscall '{}' constraint {}: arg index {} out of range (0-5)",
+                        rule.name, ci, idx
+                    ));
+                }
+                Err(_) => {
+                    warnings.push(format!(
+                        "Syscall '{}' constraint {}: invalid arg index '{}'",
+                        rule.name, ci, constraint.arg
+                    ));
+                }
+            }
+
+            // Validate arg type
+            match constraint.arg_type.as_str() {
+                "integer" | "flags" => {}
+                "pointer" | "path" | "string" => {
+                    warnings.push(format!(
+                        "Syscall '{}' constraint {}: type '{}' cannot be checked by seccomp \
+                         (pointer dereference not allowed). Use filesystem rules for path restrictions.",
+                        rule.name, ci, constraint.arg_type
+                    ));
+                }
+                other => {
+                    warnings.push(format!(
+                        "Syscall '{}' constraint {}: unknown arg type '{}'",
+                        rule.name, ci, other
+                    ));
+                }
+            }
+
+            // Validate flag names resolve
+            if constraint.arg_type == "flags" {
+                for flag_name in constraint.denied.iter().chain(constraint.allowed.iter()) {
+                    if scmm_common::flags::resolve(flag_name).is_none() {
+                        warnings.push(format!(
+                            "Syscall '{}' constraint {}: unknown flag name '{}'",
+                            rule.name, ci, flag_name
+                        ));
+                    }
+                }
+            }
+
+            // Validate integer match patterns
+            if constraint.arg_type == "integer" {
+                for pattern in &constraint.r#match {
+                    if pattern.pattern.parse::<u64>().is_err() {
+                        warnings.push(format!(
+                            "Syscall '{}' constraint {}: invalid integer match value '{}'",
+                            rule.name, ci, pattern.pattern
+                        ));
+                    }
+                }
+            }
+
+            // Warn if constraint has no checks
+            if constraint.r#match.is_empty()
+                && constraint.allowed.is_empty()
+                && constraint.denied.is_empty()
+            {
+                warnings.push(format!(
+                    "Syscall '{}' constraint {}: no match/allowed/denied values specified",
+                    rule.name, ci
+                ));
+            }
+        }
+    }
+
     // Check filesystem rules
     for rule in &policy.filesystem.rules {
         if rule.path.is_empty() {

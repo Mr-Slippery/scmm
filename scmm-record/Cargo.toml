@@ -13,6 +13,7 @@ tracing.workspace = true
 aya.workspace = true
 byteorder.workspace = true
 serde.workspace = true
+libc = "0.2"
 nix = { version = "0.28", features = ["process", "signal", "user"] }
 ctrlc = "3.4"
 gethostname = "0.4"

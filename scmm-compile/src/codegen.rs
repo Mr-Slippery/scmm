@@ -1,13 +1,80 @@
 //! Code generation for compiled policies
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use byteorder::{LittleEndian, WriteBytesExt};
+use tracing::warn;
 
 use scmm_common::{
     capture::arch,
     categories::x86_64 as syscalls,
-    policy::{policy_flags, Action, CompiledPolicyHeader, YamlPolicy},
+    policy::{policy_flags, Action, ArgConstraint, CompiledPolicyHeader, YamlPolicy},
 };
+
+// ── BPF instruction codes ──────────────────────────────────────────────
+
+const BPF_LD: u16 = 0x00;
+const BPF_JMP: u16 = 0x05;
+const BPF_RET: u16 = 0x06;
+const BPF_ALU: u16 = 0x04;
+const BPF_W: u16 = 0x00;
+const BPF_ABS: u16 = 0x20;
+const BPF_JEQ: u16 = 0x10;
+const BPF_JSET: u16 = 0x40; // test if (A & k) != 0
+const BPF_K: u16 = 0x00;
+const BPF_AND: u16 = 0x50;
+const BPF_JA: u16 = 0x00; // unconditional jump (within BPF_JMP class)
+
+// ── Seccomp return values ──────────────────────────────────────────────
+
+const SECCOMP_RET_ALLOW: u32 = 0x7fff0000;
+const SECCOMP_RET_KILL_PROCESS: u32 = 0x80000000;
+const SECCOMP_RET_LOG: u32 = 0x7ffc0000;
+const SECCOMP_RET_ERRNO: u32 = 0x00050000;
+const EPERM: u32 = 1;
+
+/// Maximum BPF program length (kernel limit)
+const BPF_MAXINSNS: usize = 4096;
+
+// ── Internal types for two-pass BPF emission ───────────────────────────
+
+/// A label target for forward-reference patching.
+#[derive(Debug, Clone, Copy)]
+enum Label {
+    Allow,
+    Deny,
+}
+
+/// A pending BPF instruction with optional label fixups.
+/// Jump offsets targeting `Allow` or `Deny` labels are patched in a second pass.
+#[derive(Debug, Clone)]
+struct PendingInsn {
+    code: u16,
+    jt: u8,
+    jf: u8,
+    k: u32,
+    /// If set, patch `jt` to (label_pos - self_pos - 1)
+    fixup_jt: Option<Label>,
+    /// If set, patch `jf` to (label_pos - self_pos - 1)
+    fixup_jf: Option<Label>,
+    /// If set, patch `k` to (label_pos - self_pos - 1) — for unconditional JA jumps
+    fixup_k: Option<Label>,
+}
+
+impl PendingInsn {
+    fn new(code: u16, jt: u8, jf: u8, k: u32) -> Self {
+        Self { code, jt, jf, k, fixup_jt: None, fixup_jf: None, fixup_k: None }
+    }
+}
+
+/// Info about a constrained syscall for dispatch patching.
+struct ConstrainedEntry {
+    /// Position of the JEQ dispatch instruction in the program
+    dispatch_pos: usize,
+    /// Position of the first instruction of the constraint block
+    block_start: usize,
+}
+
+// ── Public API ─────────────────────────────────────────────────────────
 
 /// Compile a YAML policy to binary format
 pub fn compile(policy: &YamlPolicy, target_arch: &str) -> Result<Vec<u8>> {
@@ -77,58 +144,76 @@ pub fn compile(policy: &YamlPolicy, target_arch: &str) -> Result<Vec<u8>> {
     Ok(output)
 }
 
-/// Generate seccomp BPF filter
-fn generate_seccomp_filter(policy: &YamlPolicy, arch_id: u32) -> Result<Vec<u8>> {
-    let mut instructions = Vec::new();
+// ── Seccomp BPF filter generation ──────────────────────────────────────
 
-    // Seccomp BPF instruction format (sock_filter):
-    // struct { u16 code, u8 jt, u8 jf, u32 k }
+/// Compute the byte offset into `seccomp_data` for a given arg index (0-5).
+/// `seccomp_data` layout: [0] nr(u32), [4] arch(u32), [8] instruction_pointer(u64),
+/// [16] args[0](u64), [24] args[1](u64), ... [56] args[5](u64).
+/// BPF_W loads the low 32 bits on little-endian.
+fn arg_offset(arg_idx: u32) -> u32 {
+    16 + arg_idx * 8
+}
 
-    // BPF instruction codes
-    const BPF_LD: u16 = 0x00;
-    const BPF_JMP: u16 = 0x05;
-    const BPF_RET: u16 = 0x06;
-    const BPF_W: u16 = 0x00;
-    const BPF_ABS: u16 = 0x20;
-    const BPF_JEQ: u16 = 0x10;
-    const BPF_K: u16 = 0x00;
-
-    // Seccomp return values
-    const SECCOMP_RET_ALLOW: u32 = 0x7fff0000;
-    const SECCOMP_RET_KILL_PROCESS: u32 = 0x80000000;
-    const SECCOMP_RET_LOG: u32 = 0x7ffc0000;
-    const SECCOMP_RET_ERRNO: u32 = 0x00050000;
-    const EPERM: u32 = 1;
-
-    // Helper to emit instruction
-    fn emit(instructions: &mut Vec<u8>, code: u16, jt: u8, jf: u8, k: u32) {
-        instructions.write_u16::<LittleEndian>(code).unwrap();
-        instructions.push(jt);
-        instructions.push(jf);
-        instructions.write_u32::<LittleEndian>(k).unwrap();
+/// Compute a jump offset from instruction at `from` to instruction at `to`.
+/// In BPF, jt/jf offsets are relative to the *next* instruction, so offset = to - from - 1.
+fn safe_offset(from: usize, to: usize) -> Result<u8> {
+    let offset = to
+        .checked_sub(from + 1)
+        .ok_or_else(|| anyhow::anyhow!("backward jump in BPF: from={} to={}", from, to))?;
+    if offset > 255 {
+        bail!("BPF jump offset {} exceeds max 255 (from={} to={})", offset, from, to);
     }
+    Ok(offset as u8)
+}
 
-    // Load architecture (offset 4 in seccomp_data)
-    emit(&mut instructions, BPF_LD | BPF_W | BPF_ABS, 0, 0, 4);
+/// Serialize a `PendingInsn` slice to the final BPF bytecode (little-endian `sock_filter` array).
+fn serialize_insns(insns: &[PendingInsn]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(insns.len() * 8);
+    for insn in insns {
+        out.write_u16::<LittleEndian>(insn.code).unwrap();
+        out.push(insn.jt);
+        out.push(insn.jf);
+        out.write_u32::<LittleEndian>(insn.k).unwrap();
+    }
+    out
+}
 
-    // Check architecture - if not matching, kill
-    // JEQ arch_id, 0, 1 (if equal, continue; if not, jump to kill)
-    emit(&mut instructions, BPF_JMP | BPF_JEQ | BPF_K, 1, 0, arch_id);
-    emit(&mut instructions, BPF_RET | BPF_K, 0, 0, SECCOMP_RET_KILL_PROCESS);
-
-    // Load syscall number (offset 0 in seccomp_data)
-    emit(&mut instructions, BPF_LD | BPF_W | BPF_ABS, 0, 0, 0);
-
-    // Build syscall lookup
-    let mut allow_set: std::collections::HashSet<u32> = std::collections::HashSet::new();
-    let mut deny_syscalls: Vec<u32> = Vec::new();
-
-    // Map syscall names to numbers (x86_64)
+/// Generate seccomp BPF filter from policy.
+///
+/// Filter layout:
+/// ```text
+/// [0]   LD arch
+/// [1]   JEQ arch_id → +1 / kill
+/// [2]   RET KILL_PROCESS
+/// [3]   LD syscall_nr
+///       ── unconstrained deny checks ──
+/// [4..] JEQ deny_nr → deny_label
+///       ── constrained dispatch ──
+/// [N..] JEQ constrained_nr → constraint_block_start
+///       ── unconstrained allow checks ──
+/// [M..] JEQ allow_nr → allow_label
+///       ── default action ──
+/// [D]   RET default_action
+///       ── constraint blocks ──
+/// [C0]  constraint block for syscall 0 ...
+/// [C1]  constraint block for syscall 1 ...
+///       ── terminal labels ──
+/// [DL]  RET ERRNO|EPERM      ← deny_label
+/// [AL]  RET ALLOW             ← allow_label
+/// ```
+fn generate_seccomp_filter(policy: &YamlPolicy, arch_id: u32) -> Result<Vec<u8>> {
     let syscall_map = syscalls::build_name_to_nr_map();
 
-    // Always allow bootstrap/enforcement syscalls.
-    // The recorder captures syscalls after exec, so some are never in the trace
-    // but the enforcer needs them to launch the target and apply Landlock.
+    // ── Phase 1: Classify rules ────────────────────────────────────────
+
+    // Bootstrap/enforcement syscalls that must always be allowed.
+    // These are needed for process startup and enforcement setup.
+    //
+    // Note: write/writev are NOT bootstrapped. The enforcer moves all
+    // logging before seccomp installation and uses _exit(127) on exec
+    // failure, so no writes happen after the filter is active. This
+    // means the sandboxed program cannot write unless the policy
+    // explicitly allows it.
     let bootstrap_syscalls: &[u32] = &[
         59,  // execve
         322, // execveat
@@ -139,41 +224,121 @@ fn generate_seccomp_filter(policy: &YamlPolicy, arch_id: u32) -> Result<Vec<u8>>
         445, // landlock_add_rule
         446, // landlock_restrict_self
     ];
-    for &nr in bootstrap_syscalls {
-        allow_set.insert(nr);
-    }
+
+    let mut unconstrained_allow: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut unconstrained_deny: Vec<u32> = Vec::new();
+    // (syscall_nr, action, constraints)
+    let mut constrained: Vec<(u32, Action, &[ArgConstraint])> = Vec::new();
+
+    // Track which syscall numbers appear in constrained rules
+    let mut constrained_nrs: std::collections::HashSet<u32> = std::collections::HashSet::new();
 
     for rule in &policy.syscalls {
-        if let Some(&nr) = syscall_map.get(rule.name.as_str()) {
+        let Some(&nr) = syscall_map.get(rule.name.as_str()) else {
+            continue;
+        };
+
+        // Filter constraints to only types seccomp can enforce
+        let enforceable: Vec<&ArgConstraint> = rule
+            .constraints
+            .iter()
+            .filter(|c| matches!(c.arg_type.as_str(), "integer" | "flags"))
+            .collect();
+
+        if !enforceable.is_empty() {
+            constrained.push((nr, rule.action, &rule.constraints));
+            constrained_nrs.insert(nr);
+        } else {
             match rule.action {
-                Action::Allow | Action::Log => { allow_set.insert(nr); }
-                Action::Deny | Action::Kill => { deny_syscalls.push(nr); }
+                Action::Allow | Action::Log => {
+                    unconstrained_allow.insert(nr);
+                }
+                Action::Deny | Action::Kill => {
+                    unconstrained_deny.push(nr);
+                }
                 Action::Trap => {}
             }
         }
     }
 
-    let allow_syscalls: Vec<u32> = allow_set.into_iter().collect();
-
-    // Calculate jump offsets
-    // After all checks, we have: deny instruction, then allow instruction
-    let total_checks = allow_syscalls.len() + deny_syscalls.len();
-
-    // Emit deny checks (jump to deny label if match)
-    for (i, &nr) in deny_syscalls.iter().enumerate() {
-        let remaining = total_checks - i - 1;
-        let jt = remaining as u8 + 1; // Jump past remaining checks to deny
-        emit(&mut instructions, BPF_JMP | BPF_JEQ | BPF_K, jt, 0, nr);
+    // Add bootstrap syscalls (unless they have constrained rules)
+    for &nr in bootstrap_syscalls {
+        if !constrained_nrs.contains(&nr) {
+            unconstrained_allow.insert(nr);
+        }
     }
 
-    // Emit allow checks (jump to allow label if match)
-    for (i, &nr) in allow_syscalls.iter().enumerate() {
-        let remaining = allow_syscalls.len() - i - 1;
-        let jt = remaining as u8 + 2; // Jump past remaining + deny to allow
-        emit(&mut instructions, BPF_JMP | BPF_JEQ | BPF_K, jt, 0, nr);
+    // Remove syscalls from unconstrained sets if they appear in constrained
+    unconstrained_allow.retain(|nr| !constrained_nrs.contains(nr));
+    unconstrained_deny.retain(|nr| !constrained_nrs.contains(nr));
+
+    let unconstrained_allow: Vec<u32> = unconstrained_allow.into_iter().collect();
+
+    // ── Phase 2: Build constraint blocks ───────────────────────────────
+
+    // Build the constraint block instructions for each constrained syscall.
+    // Each block ends with JA → allow_label (for allow-action rules) or
+    // JA → deny_label (for deny-action rules). If all constraints pass,
+    // the action fires; if any constraint fails, we go to deny.
+    let mut constraint_blocks: Vec<(u32, Vec<PendingInsn>)> = Vec::new();
+
+    for &(nr, action, constraints) in &constrained {
+        let block = build_constraint_block(nr, action, constraints)?;
+        if block.is_empty() {
+            // All constraints were unenforecable (pointer types) — treat as unconstrained
+            warn!("Syscall nr {} has no enforceable constraints, treating as unconstrained", nr);
+            continue;
+        }
+        constraint_blocks.push((nr, block));
     }
 
-    // Default action (if no match)
+    // ── Phase 3: Assemble program ──────────────────────────────────────
+
+    let mut prog: Vec<PendingInsn> = Vec::new();
+
+    // [0] LD arch (offset 4 in seccomp_data)
+    prog.push(PendingInsn::new(BPF_LD | BPF_W | BPF_ABS, 0, 0, 4));
+
+    // [1] JEQ arch_id → +1 / kill
+    prog.push(PendingInsn::new(BPF_JMP | BPF_JEQ | BPF_K, 1, 0, arch_id));
+
+    // [2] RET KILL_PROCESS
+    prog.push(PendingInsn::new(BPF_RET | BPF_K, 0, 0, SECCOMP_RET_KILL_PROCESS));
+
+    // [3] LD syscall_nr (offset 0)
+    prog.push(PendingInsn::new(BPF_LD | BPF_W | BPF_ABS, 0, 0, 0));
+
+    // ── Unconstrained deny checks ──
+    // JEQ deny_nr → deny_label (jt fixup)
+    for &nr in &unconstrained_deny {
+        let mut insn = PendingInsn::new(BPF_JMP | BPF_JEQ | BPF_K, 0, 0, nr);
+        insn.fixup_jt = Some(Label::Deny);
+        prog.push(insn);
+    }
+
+    // ── Constrained dispatch ──
+    // JEQ constrained_nr → block_start (patched after blocks are placed)
+    // We record positions for patching later.
+    let mut constrained_entries: Vec<ConstrainedEntry> = Vec::new();
+    for &(nr, ref _block) in &constraint_blocks {
+        let pos = prog.len();
+        // jt will be patched to block_start later; jf=0 falls through
+        prog.push(PendingInsn::new(BPF_JMP | BPF_JEQ | BPF_K, 0, 0, nr));
+        constrained_entries.push(ConstrainedEntry {
+            dispatch_pos: pos,
+            block_start: 0, // filled in phase 4
+        });
+    }
+
+    // ── Unconstrained allow checks ──
+    // JEQ allow_nr → allow_label (jt fixup)
+    for &nr in &unconstrained_allow {
+        let mut insn = PendingInsn::new(BPF_JMP | BPF_JEQ | BPF_K, 0, 0, nr);
+        insn.fixup_jt = Some(Label::Allow);
+        prog.push(insn);
+    }
+
+    // ── Default action ──
     let default_ret = match policy.settings.default_action {
         Action::Allow => SECCOMP_RET_ALLOW,
         Action::Deny => SECCOMP_RET_ERRNO | EPERM,
@@ -181,16 +346,276 @@ fn generate_seccomp_filter(policy: &YamlPolicy, arch_id: u32) -> Result<Vec<u8>>
         Action::Kill => SECCOMP_RET_KILL_PROCESS,
         Action::Trap => SECCOMP_RET_ERRNO | EPERM,
     };
-    emit(&mut instructions, BPF_RET | BPF_K, 0, 0, default_ret);
+    prog.push(PendingInsn::new(BPF_RET | BPF_K, 0, 0, default_ret));
 
-    // Deny label
-    emit(&mut instructions, BPF_RET | BPF_K, 0, 0, SECCOMP_RET_ERRNO | EPERM);
+    // ── Constraint blocks ──
+    // Each block needs a LD syscall_nr reload at the end so the next block
+    // or the allow/deny label works correctly. Actually, constraint blocks
+    // end with JA → allow/deny, and the terminal labels are just RET, so
+    // no reload is needed.
+    for (i, (_nr, block)) in constraint_blocks.iter().enumerate() {
+        constrained_entries[i].block_start = prog.len();
+        prog.extend_from_slice(block);
+    }
 
-    // Allow label
-    emit(&mut instructions, BPF_RET | BPF_K, 0, 0, SECCOMP_RET_ALLOW);
+    // ── Terminal labels ──
+    let deny_label_pos = prog.len();
+    prog.push(PendingInsn::new(BPF_RET | BPF_K, 0, 0, SECCOMP_RET_ERRNO | EPERM));
 
-    Ok(instructions)
+    let allow_label_pos = prog.len();
+    prog.push(PendingInsn::new(BPF_RET | BPF_K, 0, 0, SECCOMP_RET_ALLOW));
+
+    // ── Phase 4: Patch fixups ──────────────────────────────────────────
+
+    // Patch label fixups
+    for i in 0..prog.len() {
+        if let Some(label) = prog[i].fixup_jt {
+            let target = match label {
+                Label::Allow => allow_label_pos,
+                Label::Deny => deny_label_pos,
+            };
+            prog[i].jt = safe_offset(i, target)?;
+        }
+        if let Some(label) = prog[i].fixup_jf {
+            let target = match label {
+                Label::Allow => allow_label_pos,
+                Label::Deny => deny_label_pos,
+            };
+            prog[i].jf = safe_offset(i, target)?;
+        }
+        if let Some(label) = prog[i].fixup_k {
+            let target = match label {
+                Label::Allow => allow_label_pos,
+                Label::Deny => deny_label_pos,
+            };
+            prog[i].k = safe_offset(i, target)? as u32;
+        }
+    }
+
+    // Patch constrained dispatch JEQ → block_start
+    for entry in &constrained_entries {
+        let offset = safe_offset(entry.dispatch_pos, entry.block_start)?;
+        prog[entry.dispatch_pos].jt = offset;
+    }
+
+    // ── Validation ─────────────────────────────────────────────────────
+
+    if prog.len() > BPF_MAXINSNS {
+        bail!(
+            "BPF program too large: {} instructions (max {})",
+            prog.len(),
+            BPF_MAXINSNS
+        );
+    }
+
+    Ok(serialize_insns(&prog))
 }
+
+// ── Constraint block builders ──────────────────────────────────────────
+
+/// Build a constraint block for a single syscall.
+///
+/// The block checks all enforceable constraints (ANDed together). If all pass,
+/// jumps to the action label. If any fails, jumps to deny.
+///
+/// For `action=Allow`: pass → allow, fail → deny
+/// For `action=Deny`:  pass (matches deny pattern) → deny, fail → allow
+fn build_constraint_block(
+    nr: u32,
+    action: Action,
+    constraints: &[ArgConstraint],
+) -> Result<Vec<PendingInsn>> {
+    let mut block: Vec<PendingInsn> = Vec::new();
+
+    // Determine what "pass" and "fail" mean for this action
+    let (pass_label, fail_label) = match action {
+        Action::Allow | Action::Log => (Label::Allow, Label::Deny),
+        Action::Deny | Action::Kill => (Label::Deny, Label::Allow),
+        Action::Trap => (Label::Deny, Label::Allow),
+    };
+
+    for constraint in constraints {
+        match constraint.arg_type.as_str() {
+            "flags" => {
+                let insns = build_flags_constraint(constraint, pass_label, fail_label)?;
+                block.extend(insns);
+            }
+            "integer" => {
+                let insns = build_integer_constraint(constraint, pass_label, fail_label)?;
+                block.extend(insns);
+            }
+            _ => {
+                // pointer/path/string — can't be checked by seccomp, skip
+                warn!(
+                    "Skipping {} constraint on arg {} for syscall nr {} (seccomp can't dereference pointers)",
+                    constraint.arg_type,
+                    constraint.arg,
+                    nr
+                );
+                continue;
+            }
+        }
+    }
+
+    if block.is_empty() {
+        return Ok(block);
+    }
+
+    // All constraints passed → jump to pass_label
+    let mut ja = PendingInsn::new(BPF_JMP | BPF_JA, 0, 0, 0);
+    ja.fixup_k = Some(pass_label);
+    block.push(ja);
+
+    Ok(block)
+}
+
+/// Build BPF instructions for a `flags` constraint.
+///
+/// - `denied` list: if ANY denied bit is set → fail
+///   `LD arg[N]; JSET denied_mask → fail_label`
+///
+/// - `allowed` list: if ANY bit outside allowed set → fail
+///   `LD arg[N]; AND ~allowed_mask; JEQ 0 → (next) / fail_label`
+///
+/// Special case: O_RDONLY (value 0) in `denied` needs `AND 0x3; JEQ 0 → fail`
+/// since JSET can't test for zero bits.
+fn build_flags_constraint(
+    constraint: &ArgConstraint,
+    _pass_label: Label,
+    fail_label: Label,
+) -> Result<Vec<PendingInsn>> {
+    let arg_idx: u32 = constraint.arg.parse()?;
+    let offset = arg_offset(arg_idx);
+    let mut insns: Vec<PendingInsn> = Vec::new();
+
+    if !constraint.denied.is_empty() {
+        let mut denied_mask: u64 = 0;
+        let mut has_zero_flag = false;
+
+        for name in &constraint.denied {
+            match scmm_common::flags::resolve(name) {
+                Some(0) => {
+                    // O_RDONLY or PROT_NONE — value is 0, can't use JSET
+                    has_zero_flag = true;
+                }
+                Some(val) => {
+                    denied_mask |= val;
+                }
+                None => {
+                    warn!("Unknown flag '{}' in denied list, skipping", name);
+                }
+            }
+        }
+
+        // Handle zero-valued flags (e.g. O_RDONLY = 0)
+        // Check: LD arg; AND 0x3 (access mode mask); JEQ 0 → fail
+        if has_zero_flag {
+            // Load arg
+            insns.push(PendingInsn::new(BPF_LD | BPF_W | BPF_ABS, 0, 0, offset));
+            // AND with access mode mask (bits 0-1)
+            insns.push(PendingInsn::new(BPF_ALU | BPF_AND | BPF_K, 0, 0, 0x3));
+            // JEQ 0 → fail (if access mode is 0 = O_RDONLY, deny)
+            let mut jeq = PendingInsn::new(BPF_JMP | BPF_JEQ | BPF_K, 0, 0, 0);
+            jeq.fixup_jt = Some(fail_label);
+            insns.push(jeq);
+        }
+
+        // Handle nonzero denied flags
+        if denied_mask != 0 {
+            // Load arg
+            insns.push(PendingInsn::new(BPF_LD | BPF_W | BPF_ABS, 0, 0, offset));
+            // JSET denied_mask → fail (if any denied bit is set)
+            let mut jset = PendingInsn::new(BPF_JMP | BPF_JSET | BPF_K, 0, 0, denied_mask as u32);
+            jset.fixup_jt = Some(fail_label);
+            insns.push(jset);
+        }
+    }
+
+    if !constraint.allowed.is_empty() {
+        let mut allowed_mask: u64 = 0;
+        for name in &constraint.allowed {
+            match scmm_common::flags::resolve(name) {
+                Some(val) => {
+                    allowed_mask |= val;
+                }
+                None => {
+                    warn!("Unknown flag '{}' in allowed list, skipping", name);
+                }
+            }
+        }
+
+        if allowed_mask != 0 {
+            // Load arg
+            insns.push(PendingInsn::new(BPF_LD | BPF_W | BPF_ABS, 0, 0, offset));
+            // Mask off allowed bits: AND ~allowed_mask
+            let inv_mask = !allowed_mask as u32;
+            insns.push(PendingInsn::new(BPF_ALU | BPF_AND | BPF_K, 0, 0, inv_mask));
+            // If result != 0, there are bits outside the allowed set → fail
+            // JEQ 0 → next (ok) / fail
+            let mut jeq = PendingInsn::new(BPF_JMP | BPF_JEQ | BPF_K, 0, 0, 0);
+            jeq.fixup_jf = Some(fail_label);
+            insns.push(jeq);
+        }
+    }
+
+    Ok(insns)
+}
+
+/// Build BPF instructions for an `integer` constraint (exact match).
+///
+/// ```text
+/// LD arg[N]
+/// JEQ val_0 → skip_to_next_constraint
+/// JEQ val_1 → skip_to_next_constraint
+/// ...
+/// JEQ val_K-1 → skip_to_next_constraint
+/// JA → fail_label  (no match)
+/// ```
+///
+/// The JEQ targets point past the final JA of this constraint, which is
+/// the first instruction of the next constraint (or the block's terminal JA).
+fn build_integer_constraint(
+    constraint: &ArgConstraint,
+    _pass_label: Label,
+    fail_label: Label,
+) -> Result<Vec<PendingInsn>> {
+    let arg_idx: u32 = constraint.arg.parse()?;
+    let offset = arg_offset(arg_idx);
+
+    let values: Vec<u64> = constraint
+        .r#match
+        .iter()
+        .filter_map(|p| p.pattern.parse::<u64>().ok())
+        .collect();
+
+    if values.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut insns: Vec<PendingInsn> = Vec::new();
+
+    // Load arg
+    insns.push(PendingInsn::new(BPF_LD | BPF_W | BPF_ABS, 0, 0, offset));
+
+    // JEQ chain: each JEQ jumps past remaining JEQs + the final JA on match.
+    // There are `values.len()` JEQ instructions followed by 1 JA instruction.
+    // JEQ at index i (0-based among the JEQs) needs to jump over
+    // (values.len() - 1 - i) remaining JEQs + 1 JA = (values.len() - i) instructions.
+    let n = values.len();
+    for (i, &val) in values.iter().enumerate() {
+        let skip = (n - i) as u8; // jump over remaining JEQs + JA
+        insns.push(PendingInsn::new(BPF_JMP | BPF_JEQ | BPF_K, skip, 0, val as u32));
+    }
+
+    // No match → fail
+    let mut ja = PendingInsn::new(BPF_JMP | BPF_JA, 0, 0, 0);
+    ja.fixup_k = Some(fail_label);
+    insns.push(ja);
+
+    Ok(insns)
+}
+
+// ── Landlock & path table (unchanged) ──────────────────────────────────
 
 /// Generate Landlock rules
 fn generate_landlock_rules(policy: &YamlPolicy) -> Result<Vec<u8>> {
@@ -240,4 +665,3 @@ fn generate_path_table(policy: &YamlPolicy) -> Result<Vec<u8>> {
 
     Ok(output)
 }
-
