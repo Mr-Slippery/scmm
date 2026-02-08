@@ -20,7 +20,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with:
           toolchain: nightly-2026-01-22
-          components: rustfmt, clippy
+          components: rustfmt, clippy, rust-src
 
       - uses: Swatinem/rust-cache@v2
 
@@ -30,7 +30,12 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --exclude scmm-ebpf -- -D warnings
 
-      - name: Build
+      - name: Install bpf-linker
+        run: cargo install bpf-linker --locked
+      - name: Build ebpf
+        run: cargo build --package scmm-ebpf --target bpfel-unknown-none -Z build-std=core --release
+
+      - name: Build rest
         run: cargo build --workspace --exclude scmm-ebpf --release
 
       - name: Test

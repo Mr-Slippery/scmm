@@ -7,8 +7,8 @@ NIGHTLY="nightly-2026-01-22"
 if ! rustup toolchain list | grep -q "$NIGHTLY"; then
     echo "Installing $NIGHTLY toolchain..."
     rustup toolchain add "$NIGHTLY" --profile minimal
-    rustup component add rust-src --toolchain "$NIGHTLY"
 fi
+rustup component add rust-src --toolchain "$NIGHTLY" 2>/dev/null
 
 # Ensure bpf-linker is installed
 if ! cargo install --list | grep -q '^bpf-linker'; then
