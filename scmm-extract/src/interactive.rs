@@ -100,11 +100,23 @@ pub fn run_interactive_extraction(capture: &ParsedCapture, policy_name: &str) ->
         println!("No network connections found in capture.");
     }
 
-    // Ask for capabilities
+    // Detect capabilities from the target binary
     println!();
     println!("{}", style("Analyzing capabilities...").bold());
-    println!("Note: Capabilities cannot be automatically detected reliably from syscalls.");
 
+    let detected_caps = detect_file_capabilities(capture);
+    if !detected_caps.is_empty() {
+        println!(
+            "Detected file capabilities on target binary: {}",
+            style(detected_caps.join(", ")).green()
+        );
+        println!("These will be included in the policy so the enforcer can grant them.");
+        policy.capabilities.extend(detected_caps);
+    } else {
+        println!("No file capabilities detected on target binary.");
+    }
+
+    // Offer manual capability selection for anything not auto-detected
     let common_caps = vec![
         ("CAP_NET_RAW", "Raw sockets (ping, net tools)"),
         ("CAP_NET_ADMIN", "Network configuration"),
@@ -117,37 +129,25 @@ pub fn run_interactive_extraction(capture: &ParsedCapture, policy_name: &str) ->
         ("CAP_KILL", "Send signals to other processes"),
     ];
 
-    let items: Vec<String> = common_caps
+    // Filter out already-detected caps
+    let remaining_caps: Vec<_> = common_caps
         .iter()
-        .map(|(cap, desc)| format!("{} - {}", cap, desc))
+        .filter(|(cap, _)| !policy.capabilities.contains(&cap.to_string()))
         .collect();
 
-    let selection = MultiSelect::new()
-        .with_prompt("Select additional capabilities to grant (SPACE to select, ENTER to confirm)")
-        .items(&items)
-        .interact()?;
+    if !remaining_caps.is_empty() {
+        let items: Vec<String> = remaining_caps
+            .iter()
+            .map(|(cap, desc)| format!("{} - {}", cap, desc))
+            .collect();
 
-    for idx in selection {
-        policy.capabilities.push(common_caps[idx].0.to_string());
-    }
+        let selection = MultiSelect::new()
+            .with_prompt("Select additional capabilities to grant (SPACE to select, ENTER to confirm)")
+            .items(&items)
+            .interact()?;
 
-    // Allow custom capabilities
-    if Select::new()
-        .with_prompt("Do you want to add any other custom capabilities?")
-        .items(&["No", "Yes"])
-        .default(0)
-        .interact()? == 1
-    {
-        loop {
-            let cap: String = Input::new()
-                .with_prompt("Enter capability name (e.g. CAP_SYS_TIME) or empty to finish")
-                .allow_empty(true)
-                .interact_text()?;
-            
-            if cap.is_empty() {
-                break;
-            }
-            policy.capabilities.push(cap.to_uppercase());
+        for idx in selection {
+            policy.capabilities.push(remaining_caps[idx].0.to_string());
         }
     }
 
@@ -836,4 +836,111 @@ fn process_network(
     }
 
     Ok(())
+}
+
+/// Detect file capabilities on the target binary.
+///
+/// Resolves the target executable from the capture metadata (using execve paths
+/// or `which`), then runs `getcap` to read its file capabilities.
+/// Returns a list of capability names like `["CAP_NET_RAW"]`.
+fn detect_file_capabilities(capture: &ParsedCapture) -> Vec<String> {
+    let path = match find_target_binary(capture) {
+        Some(p) => {
+            println!("  Target binary: {}", p);
+            p
+        }
+        None => {
+            println!("  Could not determine target binary path.");
+            return Vec::new();
+        }
+    };
+
+    // Run getcap to read file capabilities
+    let output = match std::process::Command::new("getcap").arg(&path).output() {
+        Ok(o) => o,
+        Err(e) => {
+            println!("  getcap failed to run: {}", e);
+            return Vec::new();
+        }
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if stdout.trim().is_empty() {
+        return Vec::new();
+    }
+
+    parse_getcap_output(&stdout)
+}
+
+/// Find the resolved path of the target binary from the capture.
+///
+/// Looks for execve paths in the capture events first, then falls back
+/// to resolving the command name via PATH.
+fn find_target_binary(capture: &ParsedCapture) -> Option<String> {
+    // Look for a successful execve/execveat event — arg0 is the path.
+    // Only use events with ret_val == 0 (success), since execvp tries
+    // multiple PATH entries and only one succeeds.
+    for event in &capture.events {
+        let name = syscalls::get_name(event.syscall_nr);
+        if (name == "execve" || name == "execveat") && event.ret_val == 0 {
+            let arg = &event.args[0];
+            if arg.arg_type == ArgType::Path && arg.str_len > 0 {
+                if let Ok(path) = std::str::from_utf8(&arg.str_data[..arg.str_len as usize]) {
+                    if path.starts_with('/') {
+                        return Some(path.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    // Fall back: resolve the command name from metadata via which
+    if let Some(cmd) = capture.metadata.command.first() {
+        if let Ok(output) = std::process::Command::new("which").arg(cmd).output() {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !path.is_empty() {
+                    return Some(path);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Parse `getcap` output into a list of capability names.
+///
+/// Input format: `/usr/bin/ping cap_net_raw=ep`
+/// or: `/usr/bin/ping cap_net_raw,cap_sys_admin=eip`
+fn parse_getcap_output(output: &str) -> Vec<String> {
+    let mut caps = Vec::new();
+
+    for line in output.lines() {
+        // Format: "<path> <cap_list>=<flags>"
+        let parts: Vec<&str> = line.splitn(2, ' ').collect();
+        if parts.len() < 2 {
+            continue;
+        }
+
+        let cap_part = parts[1].trim().trim_start_matches("= ");
+
+        // Split on '=' to get the cap names before the flags
+        if let Some(names_part) = cap_part.split('=').next() {
+            for cap_name in names_part.split(',') {
+                let cap_name = cap_name.trim();
+                if !cap_name.is_empty() {
+                    let upper = cap_name.to_uppercase();
+                    let normalized = if upper.starts_with("CAP_") {
+                        upper
+                    } else {
+                        format!("CAP_{}", upper)
+                    };
+                    caps.push(normalized);
+                }
+            }
+        }
+    }
+
+    caps
 }
