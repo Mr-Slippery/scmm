@@ -661,6 +661,7 @@ fn generate_landlock_rules(policy: &YamlPolicy) -> Result<Vec<u8>> {
     // u8 rule_type (1 = path, 2 = port)
     // u64 access_rights
     // u16 path_index (for path rules) or port (for port rules)
+    // u8 on_missing strategy (0 = precreate, 1 = parentdir, 2 = skip)
 
     for (i, rule) in policy.filesystem.rules.iter().enumerate() {
         // Rule type: path beneath
@@ -675,6 +676,9 @@ fn generate_landlock_rules(policy: &YamlPolicy) -> Result<Vec<u8>> {
 
         // Path index (reference to path table)
         output.write_u16::<LittleEndian>(i as u16)?;
+
+        // On-missing strategy
+        output.push(rule.on_missing as u8);
     }
 
     Ok(output)

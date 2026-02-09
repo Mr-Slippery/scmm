@@ -11,17 +11,31 @@ use scmm_common::{
     categories::x86_64 as syscalls,
     policy::{
         landlock_access, Action, FilesystemRule, FilesystemRules, NetworkRule, NetworkRules,
-        PolicyMetadata, PolicySettings, SyscallRule, YamlPolicy,
+        OnMissing, PolicyMetadata, PolicySettings, SyscallRule, YamlPolicy,
     },
     ArgType, SyscallCategory,
 };
 
 use crate::parser::ParsedCapture;
 
+/// Determine the on_missing strategy for a rule.
+/// If the user provided a CLI override, use that; otherwise infer from access rights.
+fn resolve_on_missing(access: &[String], cli_override: Option<OnMissing>) -> OnMissing {
+    if let Some(strategy) = cli_override {
+        return strategy;
+    }
+    if access.contains(&landlock_access::MAKE_REG.to_string()) {
+        OnMissing::Precreate
+    } else {
+        OnMissing::Skip
+    }
+}
+
 /// Run interactive extraction
 pub fn run_interactive_extraction(
     capture: &ParsedCapture,
     policy_name: &str,
+    missing_files_override: Option<OnMissing>,
 ) -> Result<YamlPolicy> {
     let mut policy = YamlPolicy {
         version: "1.0".to_string(),
@@ -88,7 +102,7 @@ pub fn run_interactive_extraction(
 
     let file_accesses = extract_file_paths(capture);
     if !file_accesses.is_empty() {
-        process_file_paths(&mut policy, &file_accesses)?;
+        process_file_paths(&mut policy, &file_accesses, missing_files_override)?;
     } else {
         println!("No file paths found in capture.");
     }
@@ -622,7 +636,11 @@ fn collect_group_rights(
 }
 
 /// Process file paths interactively with per-path subtree choices
-fn process_file_paths(policy: &mut YamlPolicy, file_accesses: &[FileAccessInfo]) -> Result<()> {
+fn process_file_paths(
+    policy: &mut YamlPolicy,
+    file_accesses: &[FileAccessInfo],
+    missing_files_override: Option<OnMissing>,
+) -> Result<()> {
     println!("Found {} unique file paths", file_accesses.len());
     println!();
 
@@ -724,9 +742,11 @@ fn process_file_paths(policy: &mut YamlPolicy, file_accesses: &[FileAccessInfo])
                         format!("{}/**", top_dir)
                     };
                     let access = collect_group_rights(group, true, &pattern);
+                    let on_missing = resolve_on_missing(&access, missing_files_override);
                     policy.filesystem.rules.push(FilesystemRule {
                         path: pattern.clone(),
                         access,
+                        on_missing,
                     });
                     chosen_patterns.push(pattern);
                     println!();
@@ -738,9 +758,11 @@ fn process_file_paths(policy: &mut YamlPolicy, file_accesses: &[FileAccessInfo])
                         .interact_text()?;
                     let is_dir = custom.contains("**") || custom.ends_with("/*");
                     let access = collect_group_rights(group, is_dir, &custom);
+                    let on_missing = resolve_on_missing(&access, missing_files_override);
                     policy.filesystem.rules.push(FilesystemRule {
                         path: custom.clone(),
                         access,
+                        on_missing,
                     });
                     chosen_patterns.push(custom);
                     println!();
@@ -810,9 +832,11 @@ fn process_file_paths(policy: &mut YamlPolicy, file_accesses: &[FileAccessInfo])
                 info.has_trunc_open,
             );
 
+            let on_missing = resolve_on_missing(&access, missing_files_override);
             policy.filesystem.rules.push(FilesystemRule {
                 path: final_pattern.clone(),
                 access,
+                on_missing,
             });
             chosen_patterns.push(final_pattern);
         }

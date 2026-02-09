@@ -186,8 +186,9 @@ pub fn apply(policy: &LoadedPolicy) -> Result<()> {
         let access = bitmap_to_access_fs(rule.access);
         let expanded = expand_path(path);
         let access_str = format_access(access);
+        let on_missing = rule.on_missing;
 
-        match add_path_rule(&mut ruleset_created, path, access) {
+        match add_path_rule(&mut ruleset_created, path, access, on_missing) {
             Ok(true) => {
                 if expanded == *path {
                     info!("  allow {} [{}]", path, access_str);
@@ -196,7 +197,7 @@ pub fn apply(policy: &LoadedPolicy) -> Result<()> {
                 }
             }
             Ok(false) => {
-                info!("  skip  {} (path does not exist)", expanded);
+                warn!("  skip  {} (path does not exist)", expanded);
             }
             Err(e) => warn!("  FAIL  {}: {}", path, e),
         }
@@ -238,10 +239,16 @@ const PARENT_DIR_RIGHTS: &[AccessFs] = &[
     AccessFs::Refer,
 ];
 
+/// on_missing strategy constants (matching OnMissing repr values)
+const ON_MISSING_PRECREATE: u8 = 0;
+const ON_MISSING_PARENTDIR: u8 = 1;
+const ON_MISSING_SKIP: u8 = 2;
+
 fn add_path_rule(
     ruleset: &mut landlock::RulesetCreated,
     path: &str,
     access: BitFlags<AccessFs>,
+    on_missing: u8,
 ) -> Result<bool> {
     let expanded_path = expand_path(path);
 
@@ -278,40 +285,94 @@ fn add_path_rule(
             Ok(true)
         }
         Err(_) => {
-            // Path doesn't exist — find nearest existing ancestor and apply rule there.
-            // This is correct for Landlock: PathBeneath grants access to everything
-            // beneath the given path, so using the parent directory covers the
-            // not-yet-created file. We also add make_reg so the file can be created.
-            let ancestor_access = access | AccessFs::MakeReg | AccessFs::WriteFile;
-            let p = Path::new(&expanded_path);
-            let mut ancestor = p.parent();
-            while let Some(dir) = ancestor {
-                if dir.exists() {
-                    let dir_str = dir.to_string_lossy();
-                    match PathFd::new(dir_str.as_ref()) {
-                        Ok(path_fd) => {
-                            ruleset
-                                .add_rule(
-                                    PathBeneath::new(path_fd, ancestor_access)
-                                        .set_compatibility(CompatLevel::BestEffort),
-                                )
-                                .context("Failed to add path rule on ancestor")?;
-                            info!(
-                                "  (path {} does not exist, applied rule on ancestor {})",
-                                expanded_path, dir_str
-                            );
-                            return Ok(true);
-                        }
-                        Err(_) => {
-                            ancestor = dir.parent();
+            // Path doesn't exist — apply the on_missing strategy
+            match on_missing {
+                ON_MISSING_PRECREATE => {
+                    // Create missing parent directories and the file itself
+                    let p = Path::new(&expanded_path);
+                    if let Some(parent) = p.parent() {
+                        if !parent.exists() {
+                            std::fs::create_dir_all(parent).with_context(|| {
+                                format!("Failed to create parent dirs for {}", expanded_path)
+                            })?;
                         }
                     }
-                } else {
-                    ancestor = dir.parent();
+                    std::fs::File::create(&expanded_path)
+                        .with_context(|| format!("Failed to pre-create {}", expanded_path))?;
+                    info!("  pre-created {}", expanded_path);
+
+                    // Now the file exists — apply the precise rule
+                    let path_fd = PathFd::new(&expanded_path)
+                        .map_err(|e| anyhow::anyhow!("PathFd after pre-create: {}", e))?;
+                    ruleset
+                        .add_rule(
+                            PathBeneath::new(path_fd, access)
+                                .set_compatibility(CompatLevel::BestEffort),
+                        )
+                        .context("Failed to add path rule after pre-create")?;
+
+                    // Grant parent-directory rights if needed
+                    if !parent_rights.is_empty() {
+                        let p = Path::new(&expanded_path);
+                        if let Some(parent) = p.parent() {
+                            if let Ok(parent_fd) = PathFd::new(&*parent.to_string_lossy()) {
+                                let _ = ruleset.add_rule(
+                                    PathBeneath::new(parent_fd, parent_rights)
+                                        .set_compatibility(CompatLevel::BestEffort),
+                                );
+                            }
+                        }
+                    }
+                    Ok(true)
+                }
+                ON_MISSING_PARENTDIR => {
+                    // Apply restricted rights on immediate parent directory.
+                    // Only grant parent-dir rights + WriteFile + Truncate.
+                    // Do NOT grant ReadFile — that would let the process read
+                    // ALL files beneath the parent, defeating per-file rules.
+                    let mut ancestor_access = parent_rights;
+                    if access.contains(AccessFs::WriteFile) {
+                        ancestor_access |= AccessFs::WriteFile;
+                    }
+                    if access.contains(AccessFs::Truncate) {
+                        ancestor_access |= AccessFs::Truncate;
+                    }
+
+                    if ancestor_access.is_empty() {
+                        return Ok(false);
+                    }
+
+                    let p = Path::new(&expanded_path);
+                    if let Some(parent) = p.parent() {
+                        let parent_str = parent.to_string_lossy();
+                        if parent.exists() {
+                            if let Ok(path_fd) = PathFd::new(parent_str.as_ref()) {
+                                let ancestor_str = format_access(ancestor_access);
+                                ruleset
+                                    .add_rule(
+                                        PathBeneath::new(path_fd, ancestor_access)
+                                            .set_compatibility(CompatLevel::BestEffort),
+                                    )
+                                    .context("Failed to add path rule on parent")?;
+                                warn!(
+                                    "  (path {} does not exist, applied [{}] on parent {})",
+                                    expanded_path, ancestor_str, parent_str
+                                );
+                                return Ok(true);
+                            }
+                        }
+                    }
+                    Ok(false)
+                }
+                ON_MISSING_SKIP => {
+                    // Skip the rule entirely
+                    Ok(false)
+                }
+                _ => {
+                    // Unknown strategy — treat as skip
+                    Ok(false)
                 }
             }
-            // No ancestor found — skip
-            Ok(false)
         }
     }
 }

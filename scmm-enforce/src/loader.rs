@@ -30,6 +30,8 @@ pub struct LandlockRule {
     pub access: u64,
     /// Path index (for path rules) or port (for port rules)
     pub path_or_port: u16,
+    /// On-missing strategy (0 = precreate, 1 = parentdir, 2 = skip)
+    pub on_missing: u8,
 }
 
 /// Load a compiled policy file
@@ -97,11 +99,13 @@ fn parse_landlock_rules(data: &[u8]) -> Result<Vec<LandlockRule>> {
         let rule_type = cursor.read_u8()?;
         let access = cursor.read_u64::<LittleEndian>()?;
         let path_or_port = cursor.read_u16::<LittleEndian>()?;
+        let on_missing = cursor.read_u8()?;
 
         rules.push(LandlockRule {
             rule_type,
             access,
             path_or_port,
+            on_missing,
         });
     }
 

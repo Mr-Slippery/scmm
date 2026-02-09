@@ -228,6 +228,22 @@ pub struct FilesystemRules {
     pub rules: Vec<FilesystemRule>,
 }
 
+/// Strategy for handling files that don't exist at enforcement time.
+/// Stored per-rule in the policy so the user can decide per path.
+#[repr(u8)]
+#[cfg(not(feature = "no_std"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OnMissing {
+    /// Pre-create the file so Landlock can target it precisely
+    #[default]
+    Precreate = 0,
+    /// Apply restricted rights (write/create only) on the parent directory
+    Parentdir = 1,
+    /// Skip the rule entirely
+    Skip = 2,
+}
+
 /// A single filesystem rule
 #[cfg(not(feature = "no_std"))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -236,6 +252,10 @@ pub struct FilesystemRule {
     pub path: String,
     /// Allowed access types
     pub access: Vec<String>,
+    /// What to do if this path doesn't exist at enforcement time.
+    /// Only relevant for rules with make_reg access (files that may be created).
+    #[serde(default)]
+    pub on_missing: OnMissing,
 }
 
 /// Network rules
