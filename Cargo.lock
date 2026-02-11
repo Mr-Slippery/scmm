@@ -800,6 +800,7 @@ dependencies = [
  "byteorder",
  "caps",
  "clap",
+ "nix 0.28.0",
  "scmm-common",
  "serde",
  "serde_yaml",

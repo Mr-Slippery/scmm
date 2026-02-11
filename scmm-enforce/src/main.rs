@@ -13,8 +13,9 @@ use std::ffi::CString;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::{Parser, ValueEnum};
+use nix::unistd::{Gid, Uid};
 use tracing::{info, warn};
 
 mod landlock;
@@ -99,34 +100,26 @@ fn run(args: Args) -> Result<ExitCode> {
         caps.seccomp, caps.landlock
     );
 
+    let has_run_as = policy.run_as_uid.is_some() || policy.run_as_gid.is_some();
+
     // Apply capabilities if requested (requires root)
     if policy.capabilities != 0 {
-        apply_capabilities(policy.capabilities)?;
-    }
-
-    // Set NO_NEW_PRIVS before applying seccomp (required by kernel unless we have CAP_SYS_ADMIN)
-    // IMPORTANT: NO_NEW_PRIVS clears Ambient capabilities!
-    // If we rely on Ambient capabilities (which we do if policy.capabilities is set),
-    // we MUST NOT set NO_NEW_PRIVS. In that case, we must have CAP_SYS_ADMIN to load the filter.
-    if policy.capabilities == 0 {
-        set_no_new_privs()?;
-    } else {
-        info!("Skipping NO_NEW_PRIVS to preserve Ambient capabilities");
-        // Verify we have CAP_SYS_ADMIN, otherwise seccomp loading will fail
-        if !caps::has_cap(None, CapSet::Effective, caps::Capability::CAP_SYS_ADMIN).unwrap_or(false)
-        {
-            warn!("Warning: CAP_SYS_ADMIN is missing. Seccomp filter loading will likely fail without NO_NEW_PRIVS.");
+        if has_run_as {
+            warn!("run_as with capabilities: ambient capabilities will be cleared by setuid");
+            warn!("File capabilities on the target binary will still be effective");
         }
+        apply_capabilities(policy.capabilities)?;
     }
 
     // Apply enforcement based on mode.
     // Landlock must be applied BEFORE seccomp because the Landlock syscalls
     // (landlock_create_ruleset, landlock_add_rule, landlock_restrict_self)
     // would be blocked by the seccomp filter.
+    // Landlock is also applied before drop_privileges so we can open any path as root.
     match args.mode {
         EnforcementMode::Strict => {
             if !caps.landlock {
-                anyhow::bail!(
+                bail!(
                     "Landlock not available. Strict mode requires kernel 5.13+ with Landlock enabled."
                 );
             }
@@ -141,6 +134,32 @@ fn run(args: Args) -> Result<ExitCode> {
             }
         }
         EnforcementMode::Seccomp => {}
+    }
+
+    // Drop privileges AFTER Landlock but BEFORE seccomp.
+    // setuid from root clears ambient capabilities, but file caps on
+    // the target binary (xattr) remain effective.
+    if has_run_as {
+        let uid = policy
+            .run_as_uid
+            .unwrap_or_else(|| nix::unistd::getuid().as_raw());
+        let gid = policy
+            .run_as_gid
+            .unwrap_or_else(|| nix::unistd::getgid().as_raw());
+        drop_privileges(uid, gid)?;
+    }
+
+    // Set NO_NEW_PRIVS before applying seccomp (required by kernel unless we have CAP_SYS_ADMIN).
+    // After drop_privileges, ambient caps are already cleared, so NO_NEW_PRIVS is safe.
+    // Without run_as but with caps, we skip NO_NEW_PRIVS to preserve ambient caps.
+    if has_run_as || policy.capabilities == 0 {
+        set_no_new_privs()?;
+    } else {
+        info!("Skipping NO_NEW_PRIVS to preserve Ambient capabilities");
+        if !caps::has_cap(None, CapSet::Effective, caps::Capability::CAP_SYS_ADMIN).unwrap_or(false)
+        {
+            warn!("CAP_SYS_ADMIN is missing. Seccomp filter loading will likely fail without NO_NEW_PRIVS.");
+        }
     }
 
     // All logging MUST happen before seccomp is applied. After the seccomp
@@ -214,6 +233,57 @@ fn set_no_new_privs() -> Result<()> {
             std::io::Error::last_os_error()
         );
     }
+    Ok(())
+}
+
+/// Drop privileges to the specified uid/gid.
+///
+/// If the target uid/gid already match the current process, this is a no-op
+/// (avoids EPERM from setgroups/setgid/setuid which require CAP_SETGID/CAP_SETUID).
+///
+/// Order: setgroups → setgid → setuid (must setgid before setuid,
+/// because after setuid we may lose permission to call setgid).
+fn drop_privileges(uid: u32, gid: u32) -> Result<()> {
+    let current_uid = nix::unistd::getuid().as_raw();
+    let current_gid = nix::unistd::getgid().as_raw();
+    let target_uid = Uid::from_raw(uid);
+    let target_gid = Gid::from_raw(gid);
+
+    if uid == current_uid && gid == current_gid {
+        info!(
+            "Already running as uid={}, gid={} — skipping privilege drop",
+            uid, gid
+        );
+        return Ok(());
+    }
+
+    // Set supplementary groups
+    match nix::unistd::User::from_uid(target_uid) {
+        Ok(Some(user)) => {
+            let cname =
+                CString::new(user.name.as_str()).context("Invalid username for getgrouplist")?;
+            match nix::unistd::getgrouplist(&cname, target_gid) {
+                Ok(groups) => {
+                    nix::unistd::setgroups(&groups).context("setgroups failed")?;
+                }
+                Err(e) => {
+                    warn!(
+                        "Could not get supplementary groups: {}, using only primary gid",
+                        e
+                    );
+                    nix::unistd::setgroups(&[target_gid]).context("setgroups failed")?;
+                }
+            }
+        }
+        _ => {
+            nix::unistd::setgroups(&[target_gid]).context("setgroups failed")?;
+        }
+    }
+
+    nix::unistd::setgid(target_gid).context("setgid failed")?;
+    nix::unistd::setuid(target_uid).context("setuid failed")?;
+
+    info!("Dropped privileges to uid={}, gid={}", uid, gid);
     Ok(())
 }
 

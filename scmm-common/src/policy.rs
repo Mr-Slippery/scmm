@@ -90,7 +90,12 @@ pub mod policy_flags {
     pub const DEFAULT_ALLOW: u32 = 1 << 3;
     /// Log all denials
     pub const LOG_DENIALS: u32 = 1 << 4;
+    /// Has run_as uid/gid in reserved header bytes
+    pub const HAS_RUN_AS: u32 = 1 << 5;
 }
+
+/// Sentinel value in compiled policy header meaning "no uid/gid change"
+pub const RUN_AS_UNSET: u32 = 0xFFFFFFFF;
 
 /// YAML policy structure (for scmm-extract output and scmm-compile input)
 #[cfg(not(feature = "no_std"))]
@@ -139,6 +144,24 @@ pub struct PolicyMetadata {
     pub generated_at: Option<String>,
 }
 
+/// User/group to run the target command as
+#[cfg(not(feature = "no_std"))]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RunAs {
+    /// Username (resolved to UID at compile time)
+    #[serde(default)]
+    pub user: Option<String>,
+    /// Numeric UID (used directly, or as fallback if user name resolution fails)
+    #[serde(default)]
+    pub uid: Option<u32>,
+    /// Group name (resolved to GID at compile time)
+    #[serde(default)]
+    pub group: Option<String>,
+    /// Numeric GID (used directly, or as fallback if group name resolution fails)
+    #[serde(default)]
+    pub gid: Option<u32>,
+}
+
 /// Global policy settings
 #[cfg(not(feature = "no_std"))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -152,6 +175,9 @@ pub struct PolicySettings {
     /// Target architecture
     #[serde(default = "default_arch")]
     pub arch: String,
+    /// Run the target command as this user/group (for privilege dropping)
+    #[serde(default)]
+    pub run_as: Option<RunAs>,
 }
 
 #[cfg(not(feature = "no_std"))]
@@ -166,6 +192,7 @@ impl Default for PolicySettings {
             default_action: Action::Deny,
             log_denials: true,
             arch: default_arch(),
+            run_as: None,
         }
     }
 }

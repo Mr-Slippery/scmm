@@ -7,7 +7,10 @@ use std::path::Path;
 use anyhow::{bail, Context, Result};
 use byteorder::{LittleEndian, ReadBytesExt};
 
-use scmm_common::{policy::CompiledPolicyHeader, POLICY_MAGIC};
+use scmm_common::{
+    policy::{policy_flags, CompiledPolicyHeader},
+    POLICY_MAGIC, RUN_AS_UNSET,
+};
 
 /// Loaded policy data
 pub struct LoadedPolicy {
@@ -19,6 +22,10 @@ pub struct LoadedPolicy {
     pub paths: Vec<String>,
     /// Capabilities bitmask
     pub capabilities: u64,
+    /// UID to switch to before exec (None = don't switch)
+    pub run_as_uid: Option<u32>,
+    /// GID to switch to before exec (None = don't switch)
+    pub run_as_gid: Option<u32>,
 }
 
 /// Landlock rule
@@ -82,11 +89,25 @@ pub fn load_policy(path: &Path) -> Result<LoadedPolicy> {
         0
     };
 
+    // Parse run_as from reserved header bytes
+    let (run_as_uid, run_as_gid) = if header.flags & policy_flags::HAS_RUN_AS != 0 {
+        let uid = u32::from_le_bytes(header._reserved[0..4].try_into().unwrap());
+        let gid = u32::from_le_bytes(header._reserved[4..8].try_into().unwrap());
+        (
+            if uid != RUN_AS_UNSET { Some(uid) } else { None },
+            if gid != RUN_AS_UNSET { Some(gid) } else { None },
+        )
+    } else {
+        (None, None)
+    };
+
     Ok(LoadedPolicy {
         seccomp_filter,
         landlock_rules,
         paths,
         capabilities,
+        run_as_uid,
+        run_as_gid,
     })
 }
 

@@ -188,6 +188,33 @@ pub fn validate(policy: &YamlPolicy, arch: &str) -> Result<Vec<String>> {
         }
     }
 
+    // Check run_as configuration
+    if let Some(ref run_as) = policy.settings.run_as {
+        if run_as.uid == Some(0) {
+            warnings.push(
+                "run_as uid is 0 (root) - this defeats the purpose of privilege dropping"
+                    .to_string(),
+            );
+        }
+        if run_as.user.is_none() && run_as.uid.is_none() {
+            warnings.push("run_as specified but no user or uid provided".to_string());
+        }
+        if run_as.group.is_none()
+            && run_as.gid.is_none()
+            && run_as.user.is_none()
+            && run_as.uid.is_none()
+        {
+            warnings.push("run_as specified but completely empty".to_string());
+        }
+        if !policy.capabilities.is_empty() {
+            warnings.push(
+                "run_as with capabilities: ambient capabilities will be cleared by setuid. \
+                 File capabilities on the target binary will still be effective."
+                    .to_string(),
+            );
+        }
+    }
+
     // Security recommendations
     if policy.settings.default_action == Action::Allow {
         warnings.push(
