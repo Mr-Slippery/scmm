@@ -38,5 +38,8 @@ jobs:
       - name: Build rest
         run: cargo build --workspace --exclude scmm-ebpf --release
 
-      - name: Test
+      - name: Unit tests
         run: cargo test --workspace --exclude scmm-ebpf
+
+      - name: Integration tests
+        run: ./tests/run_all.sh --skip-local

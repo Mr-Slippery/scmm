@@ -1,148 +1,204 @@
 # SysCallMeMaybe (SCMM)
 
-A Linux syscall recording and sandboxing suite. Record what syscalls a program makes, interactively create a security policy, and then enforce that policy on future runs.
+A Linux syscall recording and sandboxing suite. Record what syscalls a program makes, interactively create a security policy, and enforce it on future runs using Seccomp-BPF and Landlock LSM.
 
-## Components
+## How It Works
 
-| Tool | Description |
-|------|-------------|
-| `scmm-record` | Records syscalls of a process using eBPF into a capture file |
-| `scmm-extract` | Extracts rules from capture with interactive user guidance for generalization |
-| `scmm-compile` | Converts YAML policy to efficient binary format |
-| `scmm-enforce` | Launches a process with the compiled policy enforcing syscall restrictions |
+SCMM uses a four-step pipeline: **record** -> **extract** -> **compile** -> **enforce**.
+
+1. **Record** -- eBPF tracepoints capture every syscall the target process makes
+2. **Extract** -- an interactive (or automatic) step turns raw captures into a human-readable YAML policy
+3. **Compile** -- the YAML policy is compiled into a binary format with Seccomp BPF bytecode and Landlock rule tables
+4. **Enforce** -- the compiled policy is loaded and the target is exec'd under the sandbox
+
+Enforcement is tiered because seccomp-BPF cannot dereference pointers (TOCTOU prevention):
+
+| Layer | Technology | What It Controls | Kernel |
+|-------|------------|------------------|--------|
+| 1 | Seccomp-BPF | Syscall numbers and raw argument values | 3.5+ |
+| 2 | Landlock LSM | Path-based filesystem access | 5.13+ |
 
 ## Quick Start
 
 ```bash
-# 1. Record a program's syscalls
-sudo scmm-record -o capture.scmm-cap -- ./my-program arg1 arg2
+# 1. Record a program's syscalls (requires root for eBPF)
+sudo scmm-record -f -o capture.scmm-cap -- ls -la /tmp
 
 # 2. Interactively extract a policy
-scmm-extract -i capture.scmm-cap -o policy.scmm.yaml
+scmm-extract -i capture.scmm-cap -o policy.yaml
 
 # 3. Compile the policy
-scmm-compile -i policy.scmm.yaml -o policy.scmm-pol
+scmm-compile -i policy.yaml -o policy.scmm-pol
 
-# 4. Run the program with the policy enforced
-scmm-enforce -p policy.scmm-pol -- ./my-program arg1 arg2
+# 4. Run the program under the sandbox (no root needed)
+scmm-enforce -p policy.scmm-pol -- ls -la /tmp
 ```
 
 ## Building
 
 ### Prerequisites
 
-- Rust nightly (for eBPF compilation)
-- Linux kernel 5.13+ (recommended, for Landlock support)
-- Root access (for eBPF and recording)
+- Rust nightly toolchain (for eBPF compilation)
+- Linux kernel 5.13+ (for Landlock support)
+- Root or `CAP_BPF + CAP_PERFMON` (for recording only)
 
 ### Build Commands
 
 ```bash
-# Build eBPF programs (requires nightly)
-cargo xtask build-ebpf
+# Build everything (eBPF + userspace + set capabilities)
+./build.sh
 
-# Build userspace tools
-cargo xtask build --release
-
-# Or build everything at once
-cargo xtask build-all --release
-
-# Install to /usr/local/bin
-cargo xtask install
+# Run checks (clippy + fmt)
+./check.sh
 ```
 
-## Tool Usage
+`build.sh` installs the nightly toolchain and `bpf-linker` if needed, builds the eBPF programs and userspace tools in release mode, and sets `cap_bpf,cap_perfmon,cap_dac_read_search` on `scmm-record` so it can run without sudo.
+
+## Tool Reference
 
 ### scmm-record
 
-Records syscalls using eBPF tracepoints.
+Records syscalls using eBPF tracepoints. Requires root or `CAP_BPF + CAP_PERFMON`.
+
+When running under `sudo`, the recorder automatically drops the child process to the invoking user's UID/GID (via `SUDO_UID`/`SUDO_GID`), so recorded files are owned by you, not root.
+
+```
+Usage: scmm-record [OPTIONS] -- <COMMAND>...
+
+Options:
+  -o, --output <PATH>          Output capture file [default: capture.scmm-cap]
+  -f, --follow-forks           Follow child processes (fork/clone)
+      --user <USER:GROUP>      Run child as this user:group (e.g. "nobody:nogroup", "1000:1000")
+      --files                  Record file-related syscalls only
+      --network                Record network-related syscalls only
+      --process                Record process-related syscalls only
+      --memory                 Record memory-related syscalls only
+      --ipc                    Record IPC-related syscalls only
+      --all                    Record all syscalls (default if no category given)
+  -v, --verbose                Increase verbosity (-v, -vv, -vvv)
+```
+
+Examples:
 
 ```bash
-# Record all syscalls
-sudo scmm-record -o capture.scmm-cap -- ./my-program
+# Record all syscalls, follow forks
+sudo scmm-record -f -o capture.scmm-cap -- ./my-program arg1 arg2
 
 # Record only file and network syscalls
 sudo scmm-record --files --network -o capture.scmm-cap -- ./my-program
 
-# Follow child processes
-sudo scmm-record -f -o capture.scmm-cap -- ./my-program
-
-# Available category filters:
-#   --files     File operations (open, read, write, etc.)
-#   --network   Network operations (socket, connect, etc.)
-#   --process   Process operations (fork, exec, etc.)
-#   --memory    Memory operations (mmap, mprotect, etc.)
-#   --ipc       IPC operations (pipe, shm, etc.)
-#   --all       All syscalls (default)
+# Record as a specific user (useful in containers)
+sudo scmm-record --user nobody:nogroup -o capture.scmm-cap -- ./my-program
 ```
 
 ### scmm-extract
 
-Interactively extracts rules from a capture file.
+Extracts a YAML policy from a capture file. By default runs interactively, prompting you to generalize paths and choose syscall handling per category.
 
-```bash
-# Basic extraction
-scmm-extract -i capture.scmm-cap -o policy.scmm.yaml
+```
+Usage: scmm-extract [OPTIONS] -i <INPUT>
 
-# Show statistics only
-scmm-extract -i capture.scmm-cap --stats-only
-
-# Set policy name
-scmm-extract -i capture.scmm-cap -o policy.yaml --name "my-app-policy"
+Options:
+  -i, --input <PATH>           Input capture file
+  -o, --output <PATH>          Output YAML policy [default: policy.scmm.yaml]
+      --name <NAME>            Policy name
+      --non-interactive        Auto-select defaults without prompting
+      --missing-files <STRATEGY>  How to handle non-existent paths: precreate, parentdir, skip
+      --categories <LIST>      Extract specific categories (comma-separated)
+      --stats-only             Show capture statistics without generating policy
+  -v, --verbose                Increase verbosity
 ```
 
-During extraction, you'll be prompted to:
-- Choose how to handle each syscall category
-- Generalize file paths (exact, directory, recursive patterns)
-- Generalize network connections (specific ports, any address, etc.)
+Examples:
+
+```bash
+# Interactive extraction (default)
+scmm-extract -i capture.scmm-cap -o policy.yaml
+
+# Fully automatic extraction (for scripting/CI)
+scmm-extract --non-interactive --missing-files skip -i capture.scmm-cap -o policy.yaml
+
+# Just show what was captured
+scmm-extract -i capture.scmm-cap --stats-only
+```
+
+During interactive extraction you are prompted to:
+- Choose a default action (deny/allow/log/kill) for unmatched syscalls
+- Allow or deny each observed syscall category
+- Generalize file paths (exact, directory glob, recursive glob, template)
+- Review auto-detected file capabilities
 
 ### scmm-compile
 
-Compiles YAML policies into binary format.
+Compiles a YAML policy into a binary format containing Seccomp BPF bytecode and Landlock rule tables.
 
-```bash
-# Compile for x86_64 (default)
-scmm-compile -i policy.scmm.yaml -o policy.scmm-pol
+```
+Usage: scmm-compile [OPTIONS] -i <INPUT>
 
-# Compile for ARM64
-scmm-compile -i policy.scmm.yaml -o policy.scmm-pol --arch aarch64
-
-# Skip validation (not recommended)
-scmm-compile -i policy.scmm.yaml -o policy.scmm-pol --no-validate
+Options:
+  -i, --input <PATH>           Input YAML policy file
+  -o, --output <PATH>          Output compiled policy [default: policy.scmm-pol]
+      --arch <ARCH>            Target architecture [default: x86_64]
+      --no-validate            Skip policy validation (not recommended)
+  -v, --verbose                Increase verbosity
 ```
 
 ### scmm-enforce
 
-Runs a program with policy enforcement.
+Loads a compiled policy and exec's the target command under the sandbox. No root required.
+
+The enforcer is silent by default -- only errors are printed. Use `-v` for warnings, `-vv` for info, `-vvv` for debug. This prevents log messages from mixing with the target program's stdout/stderr.
+
+```
+Usage: scmm-enforce [OPTIONS] -p <POLICY> -- <COMMAND>...
+
+Options:
+  -p, --policy <PATH>          Compiled policy file
+  -m, --mode <MODE>            Enforcement mode [default: standard]
+      --categories <LIST>      Enforce specific categories only (comma-separated)
+  -v, --verbose                Increase verbosity
+```
+
+Enforcement modes:
+
+| Mode | Behavior |
+|------|----------|
+| `standard` | Seccomp + Landlock; warns if Landlock unavailable |
+| `strict` | Seccomp + Landlock; fails if Landlock unavailable |
+| `seccomp` | Seccomp only (maximum kernel compatibility) |
+
+Examples:
 
 ```bash
-# Standard mode (Seccomp + Landlock if available)
+# Standard enforcement
 scmm-enforce -p policy.scmm-pol -- ./my-program
 
-# Strict mode (requires Landlock, fails if unavailable)
+# Strict mode (require Landlock)
 scmm-enforce -p policy.scmm-pol --mode strict -- ./my-program
 
-# Seccomp only (maximum compatibility)
-scmm-enforce -p policy.scmm-pol --mode seccomp -- ./my-program
-
-# Permissive mode (log violations but don't block)
-scmm-enforce -p policy.scmm-pol --mode permissive -- ./my-program
+# Verbose output for debugging policy denials
+scmm-enforce -vv -p policy.scmm-pol -- ./my-program
 ```
 
 ## Policy Format
 
-Policies are written in YAML:
+Policies are YAML files with these sections:
 
 ```yaml
 version: "1.0"
+
 metadata:
-  name: "my-app-policy"
-  description: "Policy for my application"
+  name: my-app-policy
+  description: "Sandbox policy for my application"
+  target_executable: my-program
 
 settings:
-  default_action: deny
+  default_action: deny    # deny | allow | log | kill
   log_denials: true
   arch: x86_64
+  run_as:                  # optional: drop privileges before exec
+    user: nobody
+    group: nogroup
 
 syscalls:
   - name: read
@@ -153,16 +209,18 @@ syscalls:
     action: allow
   - name: close
     action: allow
-  # ... more syscalls
+
+capabilities: []           # e.g. ["net_bind_service", "dac_override"]
 
 filesystem:
   rules:
-    - path: "/etc"
-      access: [read_file, read_dir]
-    - path: "/usr"
-      access: [read_file, read_dir, execute]
-    - path: "/tmp"
-      access: [read_file, write_file, read_dir, make_dir, remove]
+    - path: /etc/ld.so.cache
+      access: [execute, read_file]
+    - path: /usr/sbin/nginx
+      access: [execute, read_file]
+    - path: /tmp/app.pid
+      access: [make_reg, write_file, truncate]
+      on_missing: precreate    # precreate | parentdir | skip
 
 network:
   allow_loopback: true
@@ -170,29 +228,65 @@ network:
     - protocol: tcp
       addresses: ["0.0.0.0/0"]
       ports: [80, 443]
+  inbound:
+    - protocol: tcp
+      ports: [8080]
 ```
 
-## How It Works
+### Filesystem access rights
 
-### Recording (scmm-record)
+| Right | Description |
+|-------|-------------|
+| `execute` | Execute a file |
+| `read_file` | Read file contents |
+| `write_file` | Write to a file |
+| `read_dir` | List directory contents |
+| `make_reg` | Create a regular file |
+| `make_dir` | Create a directory |
+| `remove_file` | Delete a file |
+| `remove_dir` | Delete a directory |
+| `truncate` | Truncate a file |
+| `make_sock` | Create a Unix socket |
+| `make_fifo` | Create a FIFO |
+| `make_sym` | Create a symbolic link |
+| `refer` | Link/rename across directories |
 
-Uses eBPF tracepoints attached to `raw_syscalls:sys_enter` and `raw_syscalls:sys_exit` to capture all syscalls made by the target process. Events are sent to userspace via a ring buffer.
+### Handling non-existent paths (`on_missing`)
 
-### Enforcement (scmm-enforce)
+When a path in the policy doesn't exist at enforcement time, Landlock can't attach a rule to it. The `on_missing` field controls what happens:
 
-Uses a tiered approach because seccomp-BPF cannot dereference pointers (TOCTOU prevention):
+| Strategy | Behavior |
+|----------|----------|
+| `precreate` | The enforcer creates an empty file before applying the Landlock rule, giving precise access control. Default for paths with `make_reg`. |
+| `parentdir` | Grants restricted rights (write, no read) on the parent directory so the file can be created. |
+| `skip` | Silently drops the rule. Default for paths without `make_reg`. |
 
-| Layer | Technology | Capability | Kernel |
-|-------|------------|------------|--------|
-| 1 | Seccomp-BPF | Syscall number filtering | 3.5+ |
-| 2 | Landlock LSM | Path-based file access control | 5.13+ |
+## Privilege Requirements
 
-## Requirements
+| Tool | Privilege |
+|------|-----------|
+| `scmm-record` | `CAP_BPF + CAP_PERFMON` or root |
+| `scmm-extract` | None |
+| `scmm-compile` | None |
+| `scmm-enforce` | None (sets `NO_NEW_PRIVS` via `prctl`) |
 
-- Linux kernel 3.5+ (for seccomp)
-- Linux kernel 5.13+ (for Landlock, recommended)
-- CAP_BPF + CAP_PERFMON (or root) for recording
-- No special privileges for enforcement (uses NO_NEW_PRIVS)
+When the policy includes `capabilities`, the enforcer raises them in the ambient set and skips `NO_NEW_PRIVS`. This requires `CAP_SYS_ADMIN` on the enforcer binary.
+
+## Testing
+
+Integration tests live in `tests/` and exercise the full pipeline (record -> extract -> compile -> enforce):
+
+```bash
+# Run all tests (requires sudo for the recording step)
+./tests/run_all.sh
+
+# Skip tests marked as local_only (e.g. nginx, which needs extra setup)
+./tests/run_all.sh --skip-local
+```
+
+Tests marked `# local_only` at the top of the script are skipped with `--skip-local`. Use this in CI or environments where not all dependencies (nginx, specific sandbox configs) are available.
+
+Test artifacts are kept in `tests/out_<name>/` for debugging failed runs.
 
 ## License
 
