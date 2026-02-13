@@ -17,26 +17,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@nightly
-        with:
-          toolchain: nightly-2026-01-22
-          components: rustfmt, clippy, rust-src
-
       - uses: Swatinem/rust-cache@v2
 
-      - name: Check formatting
-        run: cargo fmt --check --package scmm-common --package scmm-record --package scmm-extract --package scmm-compile --package scmm-enforce --package xtask
+      - name: Build
+        run: ./build.sh
 
-      - name: Clippy
-        run: cargo clippy --workspace --exclude scmm-ebpf -- -D warnings
-
-      - name: Install bpf-linker
-        run: cargo install bpf-linker --locked
-      - name: Build ebpf
-        run: cargo build --package scmm-ebpf --target bpfel-unknown-none -Z build-std=core --release
-
-      - name: Build rest
-        run: cargo build --workspace --exclude scmm-ebpf --release
+      - name: Check
+        run: ./check.sh --check
 
       - name: Unit tests
         run: cargo test --workspace --exclude scmm-ebpf
