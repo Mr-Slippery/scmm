@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# local_only
 # Test: compile and enforce nginx, verify Landlock restricts /noaccess
 set -euo pipefail
 
