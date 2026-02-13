@@ -132,11 +132,7 @@ impl Recorder {
     /// the stop, adds PID to TARGET_PIDS, then SIGCONT resumes the child into
     /// execvp. This guarantees the eBPF tracer sees the execve syscall.
     /// Optional (uid, gid) to drop privileges to in the child before exec.
-    pub fn spawn_command(
-        &mut self,
-        command: &[String],
-        run_as: Option<(u32, u32)>,
-    ) -> Result<u32> {
+    pub fn spawn_command(&mut self, command: &[String], run_as: Option<(u32, u32)>) -> Result<u32> {
         use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
         use nix::unistd::{execvp, fork, ForkResult};
 

@@ -52,7 +52,13 @@ pub fn init_tracing_with_base(verbose: u8, base: tracing::Level) {
     use tracing::Level;
     use tracing_subscriber::FmtSubscriber;
 
-    let levels = [Level::ERROR, Level::WARN, Level::INFO, Level::DEBUG, Level::TRACE];
+    let levels = [
+        Level::ERROR,
+        Level::WARN,
+        Level::INFO,
+        Level::DEBUG,
+        Level::TRACE,
+    ];
     let base_idx = levels.iter().position(|l| *l == base).unwrap_or(0);
     let idx = (base_idx + verbose as usize).min(levels.len() - 1);
     let level = levels[idx];
