@@ -31,6 +31,80 @@ fn resolve_on_missing(access: &[String], cli_override: Option<OnMissing>) -> OnM
     }
 }
 
+/// Run non-interactive extraction with sensible defaults.
+///
+/// Auto-selects: deny-by-default, allow all observed syscalls,
+/// exact paths for each observed file, auto-detected capabilities only.
+pub fn run_non_interactive_extraction(
+    capture: &ParsedCapture,
+    policy_name: &str,
+    missing_files_override: Option<OnMissing>,
+) -> Result<YamlPolicy> {
+    let mut policy = YamlPolicy {
+        version: "1.0".to_string(),
+        metadata: PolicyMetadata {
+            name: policy_name.to_string(),
+            description: format!(
+                "Generated from capture of: {}",
+                capture.metadata.command.join(" ")
+            ),
+            generated_from: None,
+            target_executable: capture.metadata.command.first().cloned(),
+            generated_at: Some(chrono::Utc::now().to_rfc3339()),
+        },
+        settings: PolicySettings::default(),
+        capabilities: Vec::new(),
+        filesystem: FilesystemRules::default(),
+        network: NetworkRules::default(),
+        syscalls: Vec::new(),
+    };
+
+    policy.settings.default_action = Action::Deny;
+
+    println!("Non-interactive extraction (auto-selecting defaults)");
+    println!();
+
+    // Allow all observed syscalls
+    let syscall_counts = analyze_syscalls(capture);
+    for &nr in syscall_counts.keys() {
+        policy.syscalls.push(SyscallRule {
+            name: syscalls::get_name(nr).to_string(),
+            action: Action::Allow,
+            constraints: Vec::new(),
+        });
+    }
+    println!("Allowed {} observed syscalls", syscall_counts.len());
+
+    // Add exact path rules for each observed file
+    let file_accesses = extract_file_paths(capture);
+    for info in &file_accesses {
+        let access = infer_access_rights_with_flags(
+            &info.syscall_names,
+            false,
+            &info.path,
+            info.has_write_open,
+            info.has_create_open,
+            info.has_trunc_open,
+        );
+        let on_missing = resolve_on_missing(&access, missing_files_override);
+        policy.filesystem.rules.push(FilesystemRule {
+            path: info.path.clone(),
+            access,
+            on_missing,
+        });
+    }
+    println!("Added {} filesystem rules", file_accesses.len());
+
+    // Auto-detect capabilities
+    let detected_caps = detect_file_capabilities(capture);
+    if !detected_caps.is_empty() {
+        println!("Detected capabilities: {}", detected_caps.join(", "));
+        policy.capabilities.extend(detected_caps);
+    }
+
+    Ok(policy)
+}
+
 /// Run interactive extraction
 pub fn run_interactive_extraction(
     capture: &ParsedCapture,

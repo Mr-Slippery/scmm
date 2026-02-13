@@ -16,7 +16,7 @@ use std::process::ExitCode;
 use anyhow::{bail, Context, Result};
 use clap::{Parser, ValueEnum};
 use nix::unistd::{Gid, Uid};
-use tracing::{info, warn};
+use tracing::{info, warn, Level};
 
 mod landlock;
 mod loader;
@@ -69,7 +69,10 @@ struct Args {
 fn main() -> ExitCode {
     let args = Args::parse();
 
-    scmm_common::init_tracing(args.verbose);
+    // Enforcer is silent by default (ERROR only) since it execs into the target
+    // and any output would mix with the target's output.
+    // -v = WARN, -vv = INFO, -vvv = DEBUG, -vvvv = TRACE
+    scmm_common::init_tracing_with_base(args.verbose, Level::ERROR);
 
     match run(args) {
         Ok(code) => code,

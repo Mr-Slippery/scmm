@@ -131,7 +131,12 @@ impl Recorder {
     /// With manual fork: child raises SIGSTOP, parent waitpid(WUNTRACED) sees
     /// the stop, adds PID to TARGET_PIDS, then SIGCONT resumes the child into
     /// execvp. This guarantees the eBPF tracer sees the execve syscall.
-    pub fn spawn_command(&mut self, command: &[String]) -> Result<u32> {
+    /// Optional (uid, gid) to drop privileges to in the child before exec.
+    pub fn spawn_command(
+        &mut self,
+        command: &[String],
+        run_as: Option<(u32, u32)>,
+    ) -> Result<u32> {
         use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
         use nix::unistd::{execvp, fork, ForkResult};
 
@@ -149,12 +154,20 @@ impl Recorder {
         let c_arg_refs: Vec<&std::ffi::CStr> = c_args.iter().map(|s| s.as_c_str()).collect();
 
         // SAFETY: Between fork and exec in the child, only async-signal-safe
-        // functions are called (raise, execvp, _exit).
+        // functions are called (raise, setgid, setuid, execvp, _exit).
         match unsafe { fork() }.context("fork() failed")? {
             ForkResult::Child => {
                 // Stop ourselves BEFORE execve so parent can add our PID to
                 // TARGET_PIDS. Parent will SIGCONT us once tracing is set up.
                 let _ = nix::sys::signal::raise(nix::sys::signal::Signal::SIGSTOP);
+
+                // Drop privileges if requested (setgid before setuid)
+                if let Some((uid, gid)) = run_as {
+                    unsafe {
+                        libc::setgid(gid);
+                        libc::setuid(uid);
+                    }
+                }
 
                 // Now exec the target command
                 let _ = execvp(c_arg_refs[0], &c_arg_refs);

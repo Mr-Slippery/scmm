@@ -9,6 +9,9 @@
 # Used in tests of touch, i.e. touch x
 x
 
+# Test output directories
+tests/out_*/
+
 # sandboxes
 ## nginx
 sandboxes/nginx/access.log

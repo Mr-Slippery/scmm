@@ -42,15 +42,20 @@ pub const POLICY_VERSION: u16 = 1;
 /// 0 = WARN, 1 = INFO, 2 = DEBUG, 3+ = TRACE.
 #[cfg(not(feature = "no_std"))]
 pub fn init_tracing(verbose: u8) {
+    init_tracing_with_base(verbose, tracing::Level::WARN);
+}
+
+/// Initialize tracing with a custom base level for verbose=0.
+/// Each `-v` flag raises the level by one step from the base.
+#[cfg(not(feature = "no_std"))]
+pub fn init_tracing_with_base(verbose: u8, base: tracing::Level) {
     use tracing::Level;
     use tracing_subscriber::FmtSubscriber;
 
-    let level = match verbose {
-        0 => Level::WARN,
-        1 => Level::INFO,
-        2 => Level::DEBUG,
-        _ => Level::TRACE,
-    };
+    let levels = [Level::ERROR, Level::WARN, Level::INFO, Level::DEBUG, Level::TRACE];
+    let base_idx = levels.iter().position(|l| *l == base).unwrap_or(0);
+    let idx = (base_idx + verbose as usize).min(levels.len() - 1);
+    let level = levels[idx];
 
     let subscriber = FmtSubscriber::builder()
         .with_max_level(level)

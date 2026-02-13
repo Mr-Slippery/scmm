@@ -58,6 +58,11 @@ struct Args {
     #[arg(long)]
     stats_only: bool,
 
+    /// Non-interactive mode: auto-select defaults without prompting.
+    /// Uses deny-by-default, allows all observed syscalls, exact file paths.
+    #[arg(long)]
+    non_interactive: bool,
+
     /// Verbose output
     #[arg(short, long, action = clap::ArgAction::Count)]
     verbose: u8,
@@ -123,8 +128,11 @@ fn run(args: Args) -> Result<()> {
     });
 
     let missing_files_override = args.missing_files.map(|s| s.to_on_missing());
-    let policy =
-        interactive::run_interactive_extraction(&capture, &policy_name, missing_files_override)?;
+    let policy = if args.non_interactive {
+        interactive::run_non_interactive_extraction(&capture, &policy_name, missing_files_override)?
+    } else {
+        interactive::run_interactive_extraction(&capture, &policy_name, missing_files_override)?
+    };
 
     // Write YAML policy
     yaml::write_policy(&args.output, &policy)?;

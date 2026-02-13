@@ -64,6 +64,11 @@ struct Args {
     #[arg(short = 'f', long)]
     follow_forks: bool,
 
+    /// Run the traced command as this user:group (e.g. "nobody:nogroup", "1000:1000").
+    /// Useful when recording with sudo so the child doesn't run as root.
+    #[arg(long, value_name = "USER:GROUP")]
+    user: Option<String>,
+
     /// Verbose output
     #[arg(short, long, action = clap::ArgAction::Count)]
     verbose: u8,
@@ -132,6 +137,43 @@ fn main() -> ExitCode {
     }
 }
 
+/// Parse a "user:group" specification into (uid, gid).
+/// Accepts names or numeric IDs: "v:v", "1000:1000", "v:1000".
+fn parse_user_spec(spec: &str) -> Result<(u32, u32)> {
+    let parts: Vec<&str> = spec.splitn(2, ':').collect();
+    if parts.len() != 2 {
+        anyhow::bail!("Expected USER:GROUP format, got {:?}", spec);
+    }
+
+    let uid = match parts[0].parse::<u32>() {
+        Ok(id) => id,
+        Err(_) => {
+            let user = nix::unistd::User::from_name(parts[0])?
+                .ok_or_else(|| anyhow::anyhow!("Unknown user: {}", parts[0]))?;
+            user.uid.as_raw()
+        }
+    };
+
+    let gid = match parts[1].parse::<u32>() {
+        Ok(id) => id,
+        Err(_) => {
+            let group = nix::unistd::Group::from_name(parts[1])?
+                .ok_or_else(|| anyhow::anyhow!("Unknown group: {}", parts[1]))?;
+            group.gid.as_raw()
+        }
+    };
+
+    Ok((uid, gid))
+}
+
+/// If running under sudo, return the original user's uid/gid from
+/// SUDO_UID and SUDO_GID environment variables.
+fn resolve_sudo_user() -> Option<(u32, u32)> {
+    let uid = std::env::var("SUDO_UID").ok()?.parse::<u32>().ok()?;
+    let gid = std::env::var("SUDO_GID").ok()?.parse::<u32>().ok()?;
+    Some((uid, gid))
+}
+
 fn run(args: Args, running: Arc<AtomicBool>) -> Result<()> {
     if args.command.is_empty() {
         anyhow::bail!("No command specified");
@@ -181,9 +223,22 @@ fn run(args: Args, running: Arc<AtomicBool>) -> Result<()> {
         loader::Recorder::new(&args.output, args.category_filter(), args.follow_forks)
             .context("Failed to initialize recorder")?;
 
+    // Determine uid/gid for the child process.
+    // If --user is given, use that. Otherwise, if running under sudo,
+    // default to SUDO_UID:SUDO_GID so the child runs as the invoking user.
+    let run_as = if let Some(ref spec) = args.user {
+        Some(parse_user_spec(spec).context("Invalid --user value")?)
+    } else {
+        resolve_sudo_user()
+    };
+
+    if let Some((uid, gid)) = run_as {
+        info!("Child will run as uid={}, gid={}", uid, gid);
+    }
+
     // Spawn the target process
     let child_pid = recorder
-        .spawn_command(&args.command)
+        .spawn_command(&args.command, run_as)
         .context("Failed to spawn command")?;
 
     info!("Started process with PID {}", child_pid);
