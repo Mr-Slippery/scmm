@@ -87,6 +87,12 @@ impl CaptureWriter {
         self.metadata.command = command;
     }
 
+    /// Mark this capture as attached to an existing process
+    pub fn set_attached(&mut self, pid: u32) {
+        self.metadata.attached = true;
+        self.metadata.root_pid = pid;
+    }
+
     /// Write a syscall event
     pub fn write_event(&mut self, event: &SyscallEvent) -> Result<()> {
         // Update timestamps

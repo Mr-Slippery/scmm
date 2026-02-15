@@ -86,6 +86,9 @@ pub struct CaptureMetadata {
     pub environment: Vec<(String, String)>,
     /// Root process ID
     pub root_pid: u32,
+    /// Whether recording was done by attaching to an existing process (vs spawning)
+    #[serde(default)]
+    pub attached: bool,
     /// Process tree (all observed PIDs and their relationships)
     pub processes: Vec<ProcessInfo>,
 }

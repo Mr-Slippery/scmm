@@ -64,6 +64,10 @@ struct Args {
     #[arg(short = 'f', long)]
     follow_forks: bool,
 
+    /// Attach to an existing process by PID (mutually exclusive with command)
+    #[arg(short = 'p', long)]
+    pid: Option<u32>,
+
     /// Run the traced command as this user:group (e.g. "nobody:nogroup", "1000:1000").
     /// Useful when recording with sudo so the child doesn't run as root.
     #[arg(long, value_name = "USER:GROUP")]
@@ -74,7 +78,7 @@ struct Args {
     verbose: u8,
 
     /// Command to execute and trace
-    #[arg(trailing_var_arg = true, required = true)]
+    #[arg(trailing_var_arg = true)]
     command: Vec<String>,
 }
 
@@ -175,13 +179,23 @@ fn resolve_sudo_user() -> Option<(u32, u32)> {
 }
 
 fn run(args: Args, running: Arc<AtomicBool>) -> Result<()> {
-    if args.command.is_empty() {
-        anyhow::bail!("No command specified");
+    // Validate: exactly one of --pid or command must be provided
+    let attach_pid = args.pid;
+    let has_command = !args.command.is_empty();
+
+    match (attach_pid, has_command) {
+        (Some(_), true) => anyhow::bail!("Cannot specify both --pid and a command"),
+        (None, false) => anyhow::bail!("Must specify either --pid or a command to run"),
+        _ => {}
     }
 
     info!(
         "SysCallMeMaybe recorder starting - tracing: {}",
-        args.command.join(" ")
+        if let Some(pid) = attach_pid {
+            format!("PID {}", pid)
+        } else {
+            args.command.join(" ")
+        }
     );
     info!("Output: {}", args.output.display());
     info!(
@@ -223,28 +237,41 @@ fn run(args: Args, running: Arc<AtomicBool>) -> Result<()> {
         loader::Recorder::new(&args.output, args.category_filter(), args.follow_forks)
             .context("Failed to initialize recorder")?;
 
-    // Determine uid/gid for the child process.
-    // If --user is given, use that. Otherwise, if running under sudo,
-    // default to SUDO_UID:SUDO_GID so the child runs as the invoking user.
-    let run_as = if let Some(ref spec) = args.user {
-        Some(parse_user_spec(spec).context("Invalid --user value")?)
+    let root_pid = if let Some(pid) = attach_pid {
+        if args.user.is_some() {
+            warn!("--user is ignored when attaching to an existing process");
+        }
+
+        recorder
+            .attach_pid(pid)
+            .context("Failed to attach to process")?;
+
+        info!("Attached to process with PID {}", pid);
+        pid
     } else {
-        resolve_sudo_user()
+        // Determine uid/gid for the child process.
+        // If --user is given, use that. Otherwise, if running under sudo,
+        // default to SUDO_UID:SUDO_GID so the child runs as the invoking user.
+        let run_as = if let Some(ref spec) = args.user {
+            Some(parse_user_spec(spec).context("Invalid --user value")?)
+        } else {
+            resolve_sudo_user()
+        };
+
+        if let Some((uid, gid)) = run_as {
+            info!("Child will run as uid={}, gid={}", uid, gid);
+        }
+
+        let child_pid = recorder
+            .spawn_command(&args.command, run_as)
+            .context("Failed to spawn command")?;
+
+        info!("Started process with PID {}", child_pid);
+        child_pid
     };
 
-    if let Some((uid, gid)) = run_as {
-        info!("Child will run as uid={}, gid={}", uid, gid);
-    }
-
-    // Spawn the target process
-    let child_pid = recorder
-        .spawn_command(&args.command, run_as)
-        .context("Failed to spawn command")?;
-
-    info!("Started process with PID {}", child_pid);
-
     // Event processing loop
-    recorder.run(running, child_pid)?;
+    recorder.run(running, root_pid)?;
 
     // Finalize capture file
     recorder.finalize()?;

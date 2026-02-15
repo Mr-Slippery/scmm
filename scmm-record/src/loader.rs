@@ -47,6 +47,38 @@ enum ChildStatus {
     Signaled(i32),
 }
 
+/// Check if an arbitrary process (not necessarily our child) is still alive.
+/// Uses kill(pid, 0) which checks existence without sending a signal.
+fn check_process_alive(pid: u32) -> bool {
+    match nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None) {
+        Ok(()) => true,                         // Process exists and we have permission
+        Err(nix::errno::Errno::ESRCH) => false, // No such process
+        Err(nix::errno::Errno::EPERM) => true,  // Exists but no permission (still alive)
+        Err(_) => Path::new(&format!("/proc/{}", pid)).exists(), // Fallback
+    }
+}
+
+/// Read the command line of a process from /proc
+fn read_proc_cmdline(pid: u32) -> Vec<String> {
+    let path = format!("/proc/{}/cmdline", pid);
+    match std::fs::read(&path) {
+        Ok(data) => {
+            // /proc/pid/cmdline is NUL-separated
+            let args: Vec<String> = data
+                .split(|&b| b == 0)
+                .filter(|s| !s.is_empty())
+                .map(|s| String::from_utf8_lossy(s).to_string())
+                .collect();
+            if args.is_empty() {
+                vec![format!("<pid:{}>", pid)]
+            } else {
+                args
+            }
+        }
+        Err(_) => vec![format!("<pid:{}>", pid)],
+    }
+}
+
 /// Recorder manages eBPF programs and event collection
 pub struct Recorder {
     /// Loaded eBPF programs
@@ -206,6 +238,33 @@ impl Recorder {
         }
     }
 
+    /// Attach to an existing running process by PID
+    pub fn attach_pid(&mut self, pid: u32) -> Result<()> {
+        // Validate process exists
+        if !Path::new(&format!("/proc/{}", pid)).exists() {
+            anyhow::bail!("Process {} does not exist", pid);
+        }
+
+        // Set follow-forks config and attach tracepoints (same as spawn_command)
+        self.set_config()?;
+        self.attach_tracepoints()?;
+
+        // Add PID to eBPF tracking map
+        self.add_pid(pid)?;
+        self.tracked_pids.insert(pid, true);
+
+        // Set capture metadata
+        let cmdline = read_proc_cmdline(pid);
+        self.writer.set_command(cmdline);
+        self.writer.set_attached(pid);
+
+        // We did NOT fork this process — child_pid stays None
+        // This tells run() to use process-alive polling instead of waitpid
+
+        info!("Note: syscalls before attach point are not recorded");
+        Ok(())
+    }
+
     /// Set eBPF configuration (follow_forks flag)
     fn set_config(&mut self) -> Result<()> {
         let map = self
@@ -289,14 +348,23 @@ impl Recorder {
 
             // Check if root process is still running
             if !process_exited {
-                match check_child_status(root_pid) {
-                    ChildStatus::Running => {}
-                    ChildStatus::Exited(code) => {
-                        info!("Root process {} exited with code {}", root_pid, code);
-                        process_exited = true;
+                if self.child_pid.is_some() {
+                    // Spawn mode: use waitpid (works on our child)
+                    match check_child_status(root_pid) {
+                        ChildStatus::Running => {}
+                        ChildStatus::Exited(code) => {
+                            info!("Root process {} exited with code {}", root_pid, code);
+                            process_exited = true;
+                        }
+                        ChildStatus::Signaled(sig) => {
+                            info!("Root process {} killed by signal {}", root_pid, sig);
+                            process_exited = true;
+                        }
                     }
-                    ChildStatus::Signaled(sig) => {
-                        info!("Root process {} killed by signal {}", root_pid, sig);
+                } else {
+                    // Attach mode: poll process existence (can't waitpid on non-child)
+                    if !check_process_alive(root_pid) {
+                        info!("Attached process {} is no longer running", root_pid);
                         process_exited = true;
                     }
                 }
