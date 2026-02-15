@@ -19,6 +19,7 @@ use scmm_common::policy::OnMissing;
 
 mod interactive;
 mod parser;
+mod strace_parser;
 mod yaml;
 
 /// SysCallMeMaybe (SCMM) - Policy extractor

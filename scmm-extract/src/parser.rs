@@ -23,8 +23,25 @@ pub struct ParsedCapture {
     pub events: Vec<SyscallEvent>,
 }
 
-/// Parse a capture file
+/// Parse a capture file (auto-detects format: binary .scmm-cap or strace text)
 pub fn parse_capture(path: &Path) -> Result<ParsedCapture> {
+    // Auto-detect format by reading the first 8 bytes (magic check)
+    let mut file = File::open(path).context("Failed to open capture file")?;
+    let mut magic = [0u8; 8];
+    let bytes_read = file.read(&mut magic)?;
+
+    if bytes_read >= 8 && &magic == CAPTURE_MAGIC {
+        drop(file);
+        parse_binary_capture(path)
+    } else {
+        drop(file);
+        println!("Detected strace text format");
+        crate::strace_parser::parse_strace(path)
+    }
+}
+
+/// Parse a binary .scmm-cap capture file
+fn parse_binary_capture(path: &Path) -> Result<ParsedCapture> {
     let file = File::open(path).context("Failed to open capture file")?;
     let mut reader = BufReader::new(file);
 
@@ -34,7 +51,7 @@ pub fn parse_capture(path: &Path) -> Result<ParsedCapture> {
 
     let header: CaptureFileHeader = unsafe { scmm_common::bytes_to_struct(&header_bytes) };
 
-    // Verify magic
+    // Verify magic (should always pass since we checked above, but be safe)
     if &header.magic != CAPTURE_MAGIC {
         bail!("Invalid capture file: bad magic number");
     }
