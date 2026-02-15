@@ -13,8 +13,8 @@ CMD="/bin/echo hello"
 
 echo "=== test_echo: $CMD ==="
 
-# 1. Record (child auto-drops to SUDO_UID:SUDO_GID)
-sudo "$ROOT/target/release/scmm-record" -f -o "$WORKDIR/capture.scmm-cap" -- $CMD >/dev/null 2>&1
+# 1. Record
+"$ROOT/target/release/scmm-record" -f -o "$WORKDIR/capture.scmm-cap" -- $CMD >/dev/null 2>&1
 
 # 2. Extract (non-interactive)
 "$ROOT/target/release/scmm-extract" --non-interactive --missing-files skip \

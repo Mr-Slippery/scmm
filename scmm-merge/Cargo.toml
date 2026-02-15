@@ -1,0 +1,19 @@
+[package]
+name = "scmm-merge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SysCallMeMaybe policy merger - combines multiple YAML policies into one"
+
+[dependencies]
+scmm-common = { path = "../scmm-common" }
+anyhow.workspace = true
+clap.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_yaml.workspace = true
+chrono.workspace = true
+
+[[bin]]
+name = "scmm-merge"
+path = "src/main.rs"

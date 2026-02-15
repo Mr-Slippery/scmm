@@ -848,6 +848,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "scmm-merge"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "scmm-common",
+ "serde",
+ "serde_yaml",
+ "tracing",
+]
+
+[[package]]
 name = "scmm-record"
 version = "0.1.0"
 dependencies = [
