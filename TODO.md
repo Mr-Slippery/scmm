@@ -27,8 +27,8 @@ All four binaries are built in `target/release/`:
 To test the full pipeline:
 
 ```bash
-# 1. Record a program's syscalls (requires root for eBPF)
-sudo ./target/release/scmm-record -o capture.scmm-cap -- ls -la
+# 1. Record a program's syscalls
+./target/release/scmm-record -o capture.scmm-cap -- ls -la
 
 # 2. Interactively extract a policy
 ./target/release/scmm-extract -i capture.scmm-cap -o policy.scmm.yaml

@@ -21,8 +21,8 @@ Enforcement is tiered because seccomp-BPF cannot dereference pointers (TOCTOU pr
 ## Quick Start
 
 ```bash
-# 1. Record a program's syscalls (requires root for eBPF)
-sudo scmm-record -f -o capture.scmm-cap -- ls -la /tmp
+# 1. Record a program's syscalls
+scmm-record -f -o capture.scmm-cap -- ls -la /tmp
 
 # 2. Interactively extract a policy
 scmm-extract -i capture.scmm-cap -o policy.yaml
@@ -40,7 +40,7 @@ scmm-enforce -p policy.scmm-pol -- ls -la /tmp
 
 - Rust nightly toolchain (for eBPF compilation)
 - Linux kernel 5.13+ (for Landlock support)
-- Root or `CAP_BPF + CAP_PERFMON` (for recording only)
+- `CAP_BPF + CAP_PERFMON + CAP_DAC_READ_SEARCH` for recording (set automatically by `build.sh`)
 
 ### Build Commands
 
@@ -58,9 +58,7 @@ scmm-enforce -p policy.scmm-pol -- ls -la /tmp
 
 ### scmm-record
 
-Records syscalls using eBPF tracepoints. Requires root or `CAP_BPF + CAP_PERFMON`.
-
-When running under `sudo`, the recorder automatically drops the child process to the invoking user's UID/GID (via `SUDO_UID`/`SUDO_GID`), so recorded files are owned by you, not root.
+Records syscalls using eBPF tracepoints. Requires `CAP_BPF + CAP_PERFMON + CAP_DAC_READ_SEARCH` (set automatically by `build.sh`).
 
 ```
 Usage: scmm-record [OPTIONS] -- <COMMAND>...
@@ -82,13 +80,13 @@ Examples:
 
 ```bash
 # Record all syscalls, follow forks
-sudo scmm-record -f -o capture.scmm-cap -- ./my-program arg1 arg2
+scmm-record -f -o capture.scmm-cap -- ./my-program arg1 arg2
 
 # Record only file and network syscalls
-sudo scmm-record --files --network -o capture.scmm-cap -- ./my-program
+scmm-record --files --network -o capture.scmm-cap -- ./my-program
 
 # Record as a specific user (useful in containers)
-sudo scmm-record --user nobody:nogroup -o capture.scmm-cap -- ./my-program
+scmm-record --user nobody:nogroup -o capture.scmm-cap -- ./my-program
 ```
 
 ### scmm-extract
@@ -265,7 +263,7 @@ When a path in the policy doesn't exist at enforcement time, Landlock can't atta
 
 | Tool | Privilege |
 |------|-----------|
-| `scmm-record` | `CAP_BPF + CAP_PERFMON` or root |
+| `scmm-record` | `CAP_BPF + CAP_PERFMON + CAP_DAC_READ_SEARCH` (set by `build.sh`) |
 | `scmm-extract` | None |
 | `scmm-compile` | None |
 | `scmm-enforce` | None (sets `NO_NEW_PRIVS` via `prctl`) |
@@ -277,7 +275,7 @@ When the policy includes `capabilities`, the enforcer raises them in the ambient
 Integration tests live in `tests/` and exercise the full pipeline (record -> extract -> compile -> enforce):
 
 ```bash
-# Run all tests (requires sudo for the recording step)
+# Run all tests
 ./tests/run_all.sh
 
 # Skip tests marked as local_only (e.g. nginx, which needs extra setup)

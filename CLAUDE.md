@@ -155,7 +155,7 @@ Validator warns about: `ptrace`, `prctl`, `seccomp`, `bpf`, `mount`, `chroot`, e
 ### Privilege Requirements
 | Tool | Privilege |
 |------|-----------|
-| scmm-record | CAP_BPF + CAP_PERFMON (or root) |
+| scmm-record | CAP_BPF + CAP_PERFMON + CAP_DAC_READ_SEARCH (set by `build.sh`) |
 | scmm-extract | None |
 | scmm-compile | None |
 | scmm-enforce | None (sets NO_NEW_PRIVS) |
@@ -189,7 +189,7 @@ Validator warns about: `ptrace`, `prctl`, `seccomp`, `bpf`, `mount`, `chroot`, e
 
 ```bash
 # Record a program
-sudo ./target/release/scmm-record -o cap.scmm-cap -- ls -la
+./target/release/scmm-record -o cap.scmm-cap -- ls -la
 
 # Extract policy interactively
 ./target/release/scmm-extract -i cap.scmm-cap -o policy.yaml
