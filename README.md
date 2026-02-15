@@ -4,12 +4,13 @@ A Linux syscall recording and sandboxing suite. Record what syscalls a program m
 
 ## How It Works
 
-SCMM uses a four-step pipeline: **record** -> **extract** -> **compile** -> **enforce**.
+SCMM uses a four-step pipeline: **record** -> **extract** -> **compile** -> **enforce**, with an optional **merge** step for combining policies.
 
-1. **Record** -- eBPF tracepoints capture every syscall the target process makes
+1. **Record** -- eBPF tracepoints capture every syscall the target process makes (spawn a command or attach to a running process)
 2. **Extract** -- an interactive (or automatic) step turns raw captures into a human-readable YAML policy
-3. **Compile** -- the YAML policy is compiled into a binary format with Seccomp BPF bytecode and Landlock rule tables
-4. **Enforce** -- the compiled policy is loaded and the target is exec'd under the sandbox
+3. **Merge** *(optional)* -- combine multiple policies into one (e.g. from different runs of the same binary)
+4. **Compile** -- the YAML policy is compiled into a binary format with Seccomp BPF bytecode and Landlock rule tables
+5. **Enforce** -- the compiled policy is loaded and the target is exec'd under the sandbox
 
 Enforcement is tiered because seccomp-BPF cannot dereference pointers (TOCTOU prevention):
 
@@ -32,6 +33,18 @@ scmm-compile -i policy.yaml -o policy.scmm-pol
 
 # 4. Run the program under the sandbox (no root needed)
 scmm-enforce -p policy.scmm-pol -- ls -la /tmp
+```
+
+You can also attach to an already-running process:
+
+```bash
+scmm-record -p <PID> -f -o capture.scmm-cap
+```
+
+Or merge policies from multiple recording sessions:
+
+```bash
+scmm-merge -i policy1.yaml -i policy2.yaml -o merged.yaml
 ```
 
 ## Building
@@ -61,11 +74,12 @@ scmm-enforce -p policy.scmm-pol -- ls -la /tmp
 Records syscalls using eBPF tracepoints. Requires `CAP_BPF + CAP_PERFMON + CAP_DAC_READ_SEARCH` (set automatically by `build.sh`).
 
 ```
-Usage: scmm-record [OPTIONS] -- <COMMAND>...
+Usage: scmm-record [OPTIONS] [-- <COMMAND>...]
 
 Options:
   -o, --output <PATH>          Output capture file [default: capture.scmm-cap]
   -f, --follow-forks           Follow child processes (fork/clone)
+  -p, --pid <PID>              Attach to an existing process by PID (mutually exclusive with command)
       --user <USER:GROUP>      Run child as this user:group (e.g. "nobody:nogroup", "1000:1000")
       --files                  Record file-related syscalls only
       --network                Record network-related syscalls only
@@ -75,6 +89,8 @@ Options:
       --all                    Record all syscalls (default if no category given)
   -v, --verbose                Increase verbosity (-v, -vv, -vvv)
 ```
+
+You must specify either a command to spawn or `--pid` to attach to a running process (not both).
 
 Examples:
 
@@ -87,7 +103,15 @@ scmm-record --files --network -o capture.scmm-cap -- ./my-program
 
 # Record as a specific user (useful in containers)
 scmm-record --user nobody:nogroup -o capture.scmm-cap -- ./my-program
+
+# Attach to an already-running process
+scmm-record -p 1234 -o capture.scmm-cap
+
+# Attach with fork following (captures child processes too)
+scmm-record -p 1234 -f -o capture.scmm-cap
 ```
+
+When attaching to a running process, recording starts from the attach point -- earlier syscalls are not captured. Recording stops automatically when the target process exits, or on Ctrl+C.
 
 ### scmm-extract
 
@@ -125,6 +149,41 @@ During interactive extraction you are prompted to:
 - Allow or deny each observed syscall category
 - Generalize file paths (exact, directory glob, recursive glob, template)
 - Review auto-detected file capabilities
+
+### scmm-merge
+
+Merges multiple YAML policies into a single unified policy (union of all rules). Useful when you record the same program under different conditions and want a combined policy that covers all observed behavior.
+
+```
+Usage: scmm-merge [OPTIONS] -i <INPUT> -i <INPUT> [-i <INPUT>...]
+
+Options:
+  -i, --input <PATH>           Input YAML policy files (at least 2 required)
+  -o, --output <PATH>          Output merged policy [default: merged-policy.yaml]
+      --name <NAME>            Name for the merged policy
+  -v, --verbose                Increase verbosity
+```
+
+Examples:
+
+```bash
+# Record the same program twice under different workloads
+scmm-record -f -o cap1.scmm-cap -- ./my-server --mode a
+scmm-record -f -o cap2.scmm-cap -- ./my-server --mode b
+
+# Extract policies from each
+scmm-extract --non-interactive -i cap1.scmm-cap -o policy1.yaml
+scmm-extract --non-interactive -i cap2.scmm-cap -o policy2.yaml
+
+# Merge into one policy that covers both workloads
+scmm-merge -i policy1.yaml -i policy2.yaml -o merged.yaml --name my-server
+
+# Compile and enforce as usual
+scmm-compile -i merged.yaml -o policy.scmm-pol
+scmm-enforce -p policy.scmm-pol -- ./my-server
+```
+
+The merge takes the union of syscall rules, filesystem rules, capabilities, and network rules from all input policies.
 
 ### scmm-compile
 
@@ -265,6 +324,7 @@ When a path in the policy doesn't exist at enforcement time, Landlock can't atta
 |------|-----------|
 | `scmm-record` | `CAP_BPF + CAP_PERFMON + CAP_DAC_READ_SEARCH` (set by `build.sh`) |
 | `scmm-extract` | None |
+| `scmm-merge` | None |
 | `scmm-compile` | None |
 | `scmm-enforce` | None (sets `NO_NEW_PRIVS` via `prctl`) |
 

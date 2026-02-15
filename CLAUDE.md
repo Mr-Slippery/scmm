@@ -16,6 +16,7 @@ The name "scmm" stands for **SysCallMeMaybe**.
 |------|---------|-----------|
 | `scmm-record` | eBPF-based syscall recording | `scmm-record/src/{main,loader,capture}.rs` |
 | `scmm-extract` | Interactive policy extraction | `scmm-extract/src/{main,interactive,generalize}.rs` |
+| `scmm-merge` | Merge multiple YAML policies | `scmm-merge/src/{main,merge}.rs` |
 | `scmm-compile` | YAML → binary policy compiler | `scmm-compile/src/{main,codegen,validator}.rs` |
 | `scmm-enforce` | Policy enforcement at runtime | `scmm-enforce/src/{main,seccomp,landlock}.rs` |
 | `scmm-common` | Shared types (eBPF ↔ userspace) | `scmm-common/src/*.rs` |
@@ -191,8 +192,14 @@ Validator warns about: `ptrace`, `prctl`, `seccomp`, `bpf`, `mount`, `chroot`, e
 # Record a program
 ./target/release/scmm-record -o cap.scmm-cap -- ls -la
 
+# Attach to a running process
+./target/release/scmm-record -p <PID> -f -o cap.scmm-cap
+
 # Extract policy interactively
 ./target/release/scmm-extract -i cap.scmm-cap -o policy.yaml
+
+# Merge policies from multiple recordings
+./target/release/scmm-merge -i policy1.yaml -i policy2.yaml -o merged.yaml
 
 # Compile policy
 ./target/release/scmm-compile -i policy.yaml -o policy.pol
