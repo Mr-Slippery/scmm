@@ -1,12 +1,12 @@
 //! Syscall category definitions for filtering
 
-#[cfg(not(feature = "no_std"))]
+#[cfg(feature = "std")]
 use serde::{Deserialize, Serialize};
 
 /// Categories of syscalls for filtering
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[cfg_attr(not(feature = "no_std"), derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "std", derive(Serialize, Deserialize))]
 pub enum SyscallCategory {
     /// File operations: open, read, write, close, stat, etc.
     Files = 1,
@@ -28,7 +28,7 @@ pub enum SyscallCategory {
 
 /// Bitmask for category filtering
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-#[cfg_attr(not(feature = "no_std"), derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "std", derive(Serialize, Deserialize))]
 pub struct CategoryFilter(pub u32);
 
 impl CategoryFilter {
@@ -91,7 +91,7 @@ impl core::ops::BitOrAssign for CategoryFilter {
 }
 
 /// Complete x86_64 syscall definitions with categories and names
-#[cfg(not(feature = "no_std"))]
+#[cfg(feature = "std")]
 pub mod x86_64 {
     use super::SyscallCategory;
 

@@ -7,7 +7,7 @@
 
 pub mod capture;
 pub mod categories;
-#[cfg(not(feature = "no_std"))]
+#[cfg(feature = "std")]
 pub mod flags;
 pub mod policy;
 pub mod syscall;
@@ -40,14 +40,14 @@ pub const POLICY_VERSION: u16 = 1;
 
 /// Initialize tracing/logging with the given verbosity level.
 /// 0 = WARN, 1 = INFO, 2 = DEBUG, 3+ = TRACE.
-#[cfg(not(feature = "no_std"))]
+#[cfg(feature = "std")]
 pub fn init_tracing(verbose: u8) {
     init_tracing_with_base(verbose, tracing::Level::WARN);
 }
 
 /// Initialize tracing with a custom base level for verbose=0.
 /// Each `-v` flag raises the level by one step from the base.
-#[cfg(not(feature = "no_std"))]
+#[cfg(feature = "std")]
 pub fn init_tracing_with_base(verbose: u8, base: tracing::Level) {
     use tracing::Level;
     use tracing_subscriber::FmtSubscriber;

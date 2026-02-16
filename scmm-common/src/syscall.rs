@@ -2,13 +2,13 @@
 
 use crate::{MAX_ARGS, MAX_ARG_STR_LEN, MAX_PATH_LEN};
 
-#[cfg(not(feature = "no_std"))]
+#[cfg(feature = "std")]
 use serde::{Deserialize, Serialize};
 
 /// Type of syscall argument
 #[repr(u8)]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(feature = "no_std"), derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "std", derive(Serialize, Deserialize))]
 pub enum ArgType {
     /// Unknown or unhandled type
     #[default]

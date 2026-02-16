@@ -128,11 +128,28 @@ Options:
   -o, --output <PATH>          Output YAML policy [default: policy.scmm.yaml]
       --name <NAME>            Policy name
       --non-interactive        Auto-select defaults without prompting
-      --missing-files <STRATEGY>  How to handle non-existent paths: precreate, parentdir, skip
+      --missing-files <STRATEGY>  Strategy for read-only paths: precreate, parentdir, skip, ask
+      --created-files <STRATEGY>  Strategy for create-intent paths: precreate, parentdir, skip, ask
       --categories <LIST>      Extract specific categories (comma-separated)
       --stats-only             Show capture statistics without generating policy
   -v, --verbose                Increase verbosity
 ```
+
+The `--missing-files` and `--created-files` flags control how the extractor handles paths that may not exist at enforcement time. The extractor classifies each observed path as either **read-only** (only stat/open/exec accesses) or **create-intent** (had `O_CREAT` flag or a create-type syscall like `mkdir`).
+
+| Flag | Applies to | Default |
+|------|-----------|---------|
+| `--missing-files` | Read-only paths | `skip` |
+| `--created-files` | Create-intent paths | `precreate` |
+
+| Value | `--missing-files` behavior | `--created-files` behavior |
+|-------|---------------------------|---------------------------|
+| `skip` | Exclude all-failed paths from policy; successful paths get `on_missing: skip` | Exclude from policy entirely |
+| `precreate` | Include all paths with `on_missing: precreate` | Include with `on_missing: precreate` |
+| `parentdir` | Include all paths with `on_missing: parentdir` | Include with `on_missing: parentdir` |
+| `ask` | Prompt interactively per rule | Prompt interactively per rule |
+
+With the default `--missing-files skip`, failed PATH-lookup probes (e.g. `~/.cargo/bin/touch` returning ENOENT before finding `/usr/bin/touch`) are automatically excluded from the policy, keeping it clean.
 
 Examples:
 
@@ -141,7 +158,13 @@ Examples:
 scmm-extract -i capture.scmm-cap -o policy.yaml
 
 # Fully automatic extraction (for scripting/CI)
-scmm-extract --non-interactive --missing-files skip -i capture.scmm-cap -o policy.yaml
+scmm-extract --non-interactive -i capture.scmm-cap -o policy.yaml
+
+# Include all observed paths (even failed lookups)
+scmm-extract --non-interactive --missing-files precreate -i capture.scmm-cap -o policy.yaml
+
+# Use parentdir strategy for created files (sandbox creates the file, not enforcer)
+scmm-extract --non-interactive --created-files parentdir -i capture.scmm-cap -o policy.yaml
 
 # Just show what was captured
 scmm-extract -i capture.scmm-cap --stats-only
@@ -323,9 +346,11 @@ When a path in the policy doesn't exist at enforcement time, Landlock can't atta
 
 | Strategy | Behavior |
 |----------|----------|
-| `precreate` | The enforcer creates an empty file before applying the Landlock rule, giving precise access control. Default for paths with `make_reg`. |
+| `precreate` | The enforcer creates an empty file before applying the Landlock rule, giving precise access control. |
 | `parentdir` | Grants restricted rights (write, no read) on the parent directory so the file can be created. |
-| `skip` | Silently drops the rule. Default for paths without `make_reg`. |
+| `skip` | Silently drops the rule. |
+
+The extractor sets `on_missing` automatically based on the `--missing-files` and `--created-files` flags (see [scmm-extract](#scmm-extract)). Defaults: `precreate` for create-intent paths, `skip` for read-only paths.
 
 ## Using strace Instead of eBPF
 

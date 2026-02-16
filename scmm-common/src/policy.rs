@@ -1,6 +1,6 @@
 //! Policy definitions for syscall filtering
 
-#[cfg(not(feature = "no_std"))]
+#[cfg(feature = "std")]
 use serde::{Deserialize, Serialize};
 
 use crate::{POLICY_MAGIC, POLICY_VERSION};
@@ -8,8 +8,8 @@ use crate::{POLICY_MAGIC, POLICY_VERSION};
 /// Action to take when a rule matches
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[cfg_attr(not(feature = "no_std"), derive(Serialize, Deserialize))]
-#[cfg_attr(not(feature = "no_std"), serde(rename_all = "lowercase"))]
+#[cfg_attr(feature = "std", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "std", serde(rename_all = "lowercase"))]
 pub enum Action {
     /// Allow the syscall
     Allow = 0,
@@ -98,7 +98,7 @@ pub mod policy_flags {
 pub const RUN_AS_UNSET: u32 = 0xFFFFFFFF;
 
 /// YAML policy structure (for scmm-extract output and scmm-compile input)
-#[cfg(not(feature = "no_std"))]
+#[cfg(feature = "std")]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct YamlPolicy {
     /// Policy format version
@@ -124,7 +124,7 @@ pub struct YamlPolicy {
 }
 
 /// Policy metadata
-#[cfg(not(feature = "no_std"))]
+#[cfg(feature = "std")]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PolicyMetadata {
     /// Policy name
@@ -145,7 +145,7 @@ pub struct PolicyMetadata {
 }
 
 /// User/group to run the target command as
-#[cfg(not(feature = "no_std"))]
+#[cfg(feature = "std")]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RunAs {
     /// Username (resolved to UID at compile time)
@@ -163,7 +163,7 @@ pub struct RunAs {
 }
 
 /// Global policy settings
-#[cfg(not(feature = "no_std"))]
+#[cfg(feature = "std")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PolicySettings {
     /// Default action for unmatched syscalls
@@ -180,12 +180,12 @@ pub struct PolicySettings {
     pub run_as: Option<RunAs>,
 }
 
-#[cfg(not(feature = "no_std"))]
+#[cfg(feature = "std")]
 fn default_arch() -> String {
     "x86_64".to_string()
 }
 
-#[cfg(not(feature = "no_std"))]
+#[cfg(feature = "std")]
 impl Default for PolicySettings {
     fn default() -> Self {
         Self {
@@ -198,7 +198,7 @@ impl Default for PolicySettings {
 }
 
 /// A single syscall rule
-#[cfg(not(feature = "no_std"))]
+#[cfg(feature = "std")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyscallRule {
     /// Syscall name
@@ -211,7 +211,7 @@ pub struct SyscallRule {
 }
 
 /// Constraint on a syscall argument
-#[cfg(not(feature = "no_std"))]
+#[cfg(feature = "std")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArgConstraint {
     /// Argument name or index
@@ -231,7 +231,7 @@ pub struct ArgConstraint {
 }
 
 /// A match pattern
-#[cfg(not(feature = "no_std"))]
+#[cfg(feature = "std")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MatchPattern {
     /// Pattern string
@@ -241,13 +241,13 @@ pub struct MatchPattern {
     pub pattern_type: String,
 }
 
-#[cfg(not(feature = "no_std"))]
+#[cfg(feature = "std")]
 fn default_pattern_type() -> String {
     "exact".to_string()
 }
 
 /// Filesystem access rules (for Landlock)
-#[cfg(not(feature = "no_std"))]
+#[cfg(feature = "std")]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FilesystemRules {
     /// Individual path rules
@@ -258,7 +258,7 @@ pub struct FilesystemRules {
 /// Strategy for handling files that don't exist at enforcement time.
 /// Stored per-rule in the policy so the user can decide per path.
 #[repr(u8)]
-#[cfg(not(feature = "no_std"))]
+#[cfg(feature = "std")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum OnMissing {
@@ -272,7 +272,7 @@ pub enum OnMissing {
 }
 
 /// A single filesystem rule
-#[cfg(not(feature = "no_std"))]
+#[cfg(feature = "std")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FilesystemRule {
     /// Path or pattern
@@ -286,7 +286,7 @@ pub struct FilesystemRule {
 }
 
 /// Network rules
-#[cfg(not(feature = "no_std"))]
+#[cfg(feature = "std")]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NetworkRules {
     /// Allow loopback connections
@@ -300,13 +300,13 @@ pub struct NetworkRules {
     pub inbound: Vec<NetworkRule>,
 }
 
-#[cfg(not(feature = "no_std"))]
+#[cfg(feature = "std")]
 fn default_true() -> bool {
     true
 }
 
 /// A single network rule
-#[cfg(not(feature = "no_std"))]
+#[cfg(feature = "std")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkRule {
     /// Protocol (tcp, udp)
@@ -320,7 +320,7 @@ pub struct NetworkRule {
 }
 
 /// Landlock access rights (for filesystem rules)
-#[cfg(not(feature = "no_std"))]
+#[cfg(feature = "std")]
 pub mod landlock_access {
     pub const EXECUTE: &str = "execute";
     pub const WRITE_FILE: &str = "write_file";

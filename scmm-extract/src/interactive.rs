@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::Result;
+use clap::ValueEnum;
 use console::style;
 use dialoguer::{Input, MultiSelect, Select};
 
@@ -18,16 +19,76 @@ use scmm_common::{
 
 use crate::parser::ParsedCapture;
 
+/// Strategy for handling files that may not exist at enforcement time
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum MissingFilesStrategy {
+    Precreate,
+    Parentdir,
+    Skip,
+    /// Prompt the user interactively for each rule
+    Ask,
+}
+
+const ON_MISSING_CHOICES: &[&str] = &[
+    "precreate  — enforcer pre-creates the file for precise Landlock targeting",
+    "parentdir  — grant restricted rights on parent directory",
+    "skip       — silently drop the rule",
+];
+
+fn prompt_on_missing(path: &str) -> Result<OnMissing> {
+    let selection = Select::new()
+        .with_prompt(format!("on_missing strategy for {}", path))
+        .items(ON_MISSING_CHOICES)
+        .default(0)
+        .interact()?;
+    Ok(match selection {
+        0 => OnMissing::Precreate,
+        1 => OnMissing::Parentdir,
+        _ => OnMissing::Skip,
+    })
+}
+
 /// Determine the on_missing strategy for a rule.
-/// If the user provided a CLI override, use that; otherwise infer from access rights.
-fn resolve_on_missing(access: &[String], cli_override: Option<OnMissing>) -> OnMissing {
-    if let Some(strategy) = cli_override {
-        return strategy;
-    }
-    if access.contains(&landlock_access::MAKE_REG.to_string()) {
-        OnMissing::Precreate
+///
+/// Uses `created_files` for paths with create intent (`make_reg`),
+/// `missing_files` for read-only paths.  `Ask` triggers an interactive prompt.
+///
+/// Returns `None` to signal that the path should be excluded from the policy
+/// (e.g. `--created-files skip` for create-intent paths).
+fn resolve_on_missing(
+    access: &[String],
+    path: &str,
+    missing_files: Option<MissingFilesStrategy>,
+    created_files: Option<MissingFilesStrategy>,
+) -> Result<Option<OnMissing>> {
+    let is_create = access.contains(&landlock_access::MAKE_REG.to_string());
+    let strategy = if is_create {
+        created_files
     } else {
-        OnMissing::Skip
+        missing_files
+    };
+
+    match strategy {
+        Some(MissingFilesStrategy::Precreate) => Ok(Some(OnMissing::Precreate)),
+        Some(MissingFilesStrategy::Parentdir) => Ok(Some(OnMissing::Parentdir)),
+        Some(MissingFilesStrategy::Skip) => {
+            if is_create {
+                // Created files with skip → exclude from policy entirely
+                // (they don't exist yet, so on_missing:skip at enforcement would always drop them)
+                Ok(None)
+            } else {
+                Ok(Some(OnMissing::Skip))
+            }
+        }
+        Some(MissingFilesStrategy::Ask) => prompt_on_missing(path).map(Some),
+        None => {
+            // Default: precreate for create-intent, skip for read-only
+            if is_create {
+                Ok(Some(OnMissing::Precreate))
+            } else {
+                Ok(Some(OnMissing::Skip))
+            }
+        }
     }
 }
 
@@ -38,7 +99,8 @@ fn resolve_on_missing(access: &[String], cli_override: Option<OnMissing>) -> OnM
 pub fn run_non_interactive_extraction(
     capture: &ParsedCapture,
     policy_name: &str,
-    missing_files_override: Option<OnMissing>,
+    missing_files: Option<MissingFilesStrategy>,
+    created_files: Option<MissingFilesStrategy>,
 ) -> Result<YamlPolicy> {
     let mut policy = YamlPolicy {
         version: "1.0".to_string(),
@@ -76,7 +138,7 @@ pub fn run_non_interactive_extraction(
     println!("Allowed {} observed syscalls", syscall_counts.len());
 
     // Add exact path rules for each observed file
-    let file_accesses = extract_file_paths(capture);
+    let file_accesses = extract_file_paths(capture, missing_files);
     for info in &file_accesses {
         let access = infer_access_rights_with_flags(
             &info.syscall_names,
@@ -86,14 +148,17 @@ pub fn run_non_interactive_extraction(
             info.has_create_open,
             info.has_trunc_open,
         );
-        let on_missing = resolve_on_missing(&access, missing_files_override);
-        policy.filesystem.rules.push(FilesystemRule {
-            path: info.path.clone(),
-            access,
-            on_missing,
-        });
+        if let Some(on_missing) =
+            resolve_on_missing(&access, &info.path, missing_files, created_files)?
+        {
+            policy.filesystem.rules.push(FilesystemRule {
+                path: info.path.clone(),
+                access,
+                on_missing,
+            });
+        }
     }
-    println!("Added {} filesystem rules", file_accesses.len());
+    println!("Added {} filesystem rules", policy.filesystem.rules.len());
 
     // Auto-detect capabilities
     let detected_caps = detect_file_capabilities(capture);
@@ -109,7 +174,8 @@ pub fn run_non_interactive_extraction(
 pub fn run_interactive_extraction(
     capture: &ParsedCapture,
     policy_name: &str,
-    missing_files_override: Option<OnMissing>,
+    missing_files: Option<MissingFilesStrategy>,
+    created_files: Option<MissingFilesStrategy>,
 ) -> Result<YamlPolicy> {
     let mut policy = YamlPolicy {
         version: "1.0".to_string(),
@@ -174,9 +240,9 @@ pub fn run_interactive_extraction(
     println!();
     println!("{}", style("Analyzing file accesses...").bold());
 
-    let file_accesses = extract_file_paths(capture);
+    let file_accesses = extract_file_paths(capture, missing_files);
     if !file_accesses.is_empty() {
-        process_file_paths(&mut policy, &file_accesses, missing_files_override)?;
+        process_file_paths(&mut policy, &file_accesses, missing_files, created_files)?;
     } else {
         println!("No file paths found in capture.");
     }
@@ -426,10 +492,39 @@ const O_RDWR: u64 = 0x2;
 const O_CREAT: u64 = 0x40;
 const O_TRUNC: u64 = 0x200;
 
-/// Extract file paths from capture events
-fn extract_file_paths(capture: &ParsedCapture) -> Vec<FileAccessInfo> {
+/// Syscalls that inherently create filesystem entries (independent of open flags).
+const CREATE_INTENT_SYSCALLS: &[&str] = &[
+    "creat",
+    "mkdir",
+    "mkdirat",
+    "mknod",
+    "mknodat",
+    "link",
+    "linkat",
+    "symlink",
+    "symlinkat",
+];
+
+/// Extract file paths from capture events.
+///
+/// All-failed read-only paths (where every access returned ret_val < 0 and there
+/// was no create intent) are excluded unless the user explicitly asked to include
+/// them via `--missing-files precreate` or `--missing-files parentdir`.
+fn extract_file_paths(
+    capture: &ParsedCapture,
+    missing_files: Option<MissingFilesStrategy>,
+) -> Vec<FileAccessInfo> {
+    // Exclude all-failed read-only paths unless user explicitly asked to include them
+    let exclude_failed = !matches!(
+        missing_files,
+        Some(MissingFilesStrategy::Precreate) | Some(MissingFilesStrategy::Parentdir)
+    );
     // Collect (path, syscall_nr) -> (count, has_write_open, has_create_open, has_trunc_open)
     let mut path_map: HashMap<(String, u32), (usize, bool, bool, bool)> = HashMap::new();
+
+    // Per-path tracking: has any successful access OR any create-intent access?
+    // (has_success, has_create_intent)
+    let mut path_relevance: HashMap<String, (bool, bool)> = HashMap::new();
 
     let working_dir = &capture.metadata.working_dir;
 
@@ -469,6 +564,17 @@ fn extract_file_paths(capture: &ParsedCapture) -> Vec<FileAccessInfo> {
                     let is_create = (flags_val & O_CREAT) != 0;
                     let is_trunc = (flags_val & O_TRUNC) != 0;
 
+                    // Track per-path relevance for failed-path filtering
+                    let relevance = path_relevance
+                        .entry(normalized.clone())
+                        .or_insert((false, false));
+                    if event.ret_val >= 0 {
+                        relevance.0 = true; // has_success
+                    }
+                    if is_create || CREATE_INTENT_SYSCALLS.contains(&name) {
+                        relevance.1 = true; // has_create_intent
+                    }
+
                     let entry = path_map
                         .entry((normalized, event.syscall_nr))
                         .or_insert((0, false, false, false));
@@ -495,6 +601,23 @@ fn extract_file_paths(capture: &ParsedCapture) -> Vec<FileAccessInfo> {
         entry.2 |= write_open;
         entry.3 |= create_open;
         entry.4 |= trunc_open;
+    }
+
+    // Filter out paths that only have failed non-creating accesses
+    let total_before = by_path.len();
+    if exclude_failed {
+        by_path.retain(|path, _| {
+            let (has_success, has_create_intent) =
+                path_relevance.get(path).copied().unwrap_or((false, false));
+            has_success || has_create_intent
+        });
+        let excluded = total_before - by_path.len();
+        if excluded > 0 {
+            println!(
+                "Excluded {} path(s) with only failed non-creating accesses",
+                excluded
+            );
+        }
     }
 
     let mut results: Vec<FileAccessInfo> = by_path
@@ -713,7 +836,8 @@ fn collect_group_rights(
 fn process_file_paths(
     policy: &mut YamlPolicy,
     file_accesses: &[FileAccessInfo],
-    missing_files_override: Option<OnMissing>,
+    missing_files: Option<MissingFilesStrategy>,
+    created_files: Option<MissingFilesStrategy>,
 ) -> Result<()> {
     println!("Found {} unique file paths", file_accesses.len());
     println!();
@@ -816,12 +940,15 @@ fn process_file_paths(
                         format!("{}/**", top_dir)
                     };
                     let access = collect_group_rights(group, true, &pattern);
-                    let on_missing = resolve_on_missing(&access, missing_files_override);
-                    policy.filesystem.rules.push(FilesystemRule {
-                        path: pattern.clone(),
-                        access,
-                        on_missing,
-                    });
+                    if let Some(on_missing) =
+                        resolve_on_missing(&access, &pattern, missing_files, created_files)?
+                    {
+                        policy.filesystem.rules.push(FilesystemRule {
+                            path: pattern.clone(),
+                            access,
+                            on_missing,
+                        });
+                    }
                     chosen_patterns.push(pattern);
                     println!();
                     continue;
@@ -832,12 +959,15 @@ fn process_file_paths(
                         .interact_text()?;
                     let is_dir = custom.contains("**") || custom.ends_with("/*");
                     let access = collect_group_rights(group, is_dir, &custom);
-                    let on_missing = resolve_on_missing(&access, missing_files_override);
-                    policy.filesystem.rules.push(FilesystemRule {
-                        path: custom.clone(),
-                        access,
-                        on_missing,
-                    });
+                    if let Some(on_missing) =
+                        resolve_on_missing(&access, &custom, missing_files, created_files)?
+                    {
+                        policy.filesystem.rules.push(FilesystemRule {
+                            path: custom.clone(),
+                            access,
+                            on_missing,
+                        });
+                    }
                     chosen_patterns.push(custom);
                     println!();
                     continue;
@@ -906,12 +1036,15 @@ fn process_file_paths(
                 info.has_trunc_open,
             );
 
-            let on_missing = resolve_on_missing(&access, missing_files_override);
-            policy.filesystem.rules.push(FilesystemRule {
-                path: final_pattern.clone(),
-                access,
-                on_missing,
-            });
+            if let Some(on_missing) =
+                resolve_on_missing(&access, &final_pattern, missing_files, created_files)?
+            {
+                policy.filesystem.rules.push(FilesystemRule {
+                    path: final_pattern.clone(),
+                    access,
+                    on_missing,
+                });
+            }
             chosen_patterns.push(final_pattern);
         }
 
@@ -1056,6 +1189,180 @@ fn find_target_binary(capture: &ParsedCapture) -> Option<String> {
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use scmm_common::capture::CaptureMetadata;
+    use scmm_common::{SyscallArg, SyscallEvent, MAX_ARG_STR_LEN};
+
+    /// Helper: create a SyscallEvent with a path argument.
+    fn make_event(syscall_nr: u32, path: &str, ret_val: i64, flags: u64) -> SyscallEvent {
+        let mut event = SyscallEvent::default();
+        event.syscall_nr = syscall_nr;
+        event.ret_val = ret_val;
+
+        // For openat (257): arg0=dirfd, arg1=path, arg2=flags
+        let path_arg_idx: usize;
+        let flags_arg_idx: usize;
+        match syscall_nr {
+            257 => {
+                // openat
+                path_arg_idx = 1;
+                flags_arg_idx = 2;
+            }
+            _ => {
+                // stat(4), access(21), execve(59): arg0=path
+                path_arg_idx = 0;
+                flags_arg_idx = usize::MAX;
+            }
+        }
+
+        // Set path argument
+        let mut arg = SyscallArg::default();
+        arg.arg_type = ArgType::Path;
+        let bytes = path.as_bytes();
+        let len = bytes.len().min(MAX_ARG_STR_LEN);
+        arg.str_data[..len].copy_from_slice(&bytes[..len]);
+        arg.str_len = len as u16;
+        event.args[path_arg_idx] = arg;
+
+        // Set flags argument for openat
+        if flags_arg_idx < 6 {
+            event.args[flags_arg_idx].raw_value = flags;
+        }
+
+        event
+    }
+
+    fn make_capture(events: Vec<SyscallEvent>) -> ParsedCapture {
+        ParsedCapture {
+            metadata: CaptureMetadata {
+                hostname: String::new(),
+                kernel_release: String::new(),
+                command: vec!["test".into()],
+                working_dir: "/tmp".into(),
+                environment: Vec::new(),
+                root_pid: 1,
+                attached: false,
+                processes: Vec::new(),
+            },
+            events,
+        }
+    }
+
+    #[test]
+    fn default_skips_failed_accesses() {
+        // Simulate PATH lookup: multiple failed execve, then one success
+        let events = vec![
+            make_event(59, "/home/user/.cargo/bin/touch", -2, 0), // ENOENT
+            make_event(59, "/usr/local/bin/touch", -2, 0),        // ENOENT
+            make_event(59, "/usr/bin/touch", 0, 0),               // success
+        ];
+        let capture = make_capture(events);
+
+        // Default (None / skip): only the successful path
+        let filtered = extract_file_paths(&capture, None);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].path, "/usr/bin/touch");
+
+        // With precreate: all 3 paths present (all-failed included)
+        let all = extract_file_paths(&capture, Some(MissingFilesStrategy::Precreate));
+        assert_eq!(all.len(), 3);
+    }
+
+    #[test]
+    fn keeps_create_intent_files() {
+        // touch creates a file: openat with O_CREAT that might fail first (ENOENT on stat)
+        // then succeed on openat with O_CREAT
+        let events = vec![
+            make_event(4, "/tmp/newfile", -2, 0), // stat fails (ENOENT)
+            make_event(257, "/tmp/newfile", 0, O_CREAT), // openat with O_CREAT succeeds
+        ];
+        let capture = make_capture(events);
+
+        let filtered = extract_file_paths(&capture, None);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].path, "/tmp/newfile");
+    }
+
+    #[test]
+    fn keeps_create_intent_even_if_all_fail() {
+        // File that the app tries to create but all attempts fail (e.g., permission denied)
+        let events = vec![
+            make_event(257, "/root/protected", -13, O_CREAT | O_WRONLY), // EACCES
+        ];
+        let capture = make_capture(events);
+
+        let filtered = extract_file_paths(&capture, None);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].path, "/root/protected");
+    }
+
+    #[test]
+    fn keeps_mkdir_even_if_failed() {
+        // mkdir is inherently a create-intent syscall (nr 83)
+        let events = vec![
+            make_event(83, "/tmp/newdir", -13, 0), // EACCES
+        ];
+        let capture = make_capture(events);
+
+        let filtered = extract_file_paths(&capture, None);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].path, "/tmp/newdir");
+    }
+
+    #[test]
+    fn drops_pure_read_failures() {
+        // cat tries to read a file that doesn't exist
+        let events = vec![
+            make_event(257, "/tmp/nonexistent", -2, 0), // openat O_RDONLY, ENOENT
+            make_event(4, "/tmp/nonexistent", -2, 0),   // stat, ENOENT
+        ];
+        let capture = make_capture(events);
+
+        let filtered = extract_file_paths(&capture, None);
+        assert_eq!(filtered.len(), 0);
+    }
+
+    #[test]
+    fn keeps_path_if_later_success() {
+        // File initially fails stat but is later opened successfully
+        let events = vec![
+            make_event(4, "/etc/config", -2, 0),  // stat fails
+            make_event(257, "/etc/config", 0, 0), // openat succeeds later
+        ];
+        let capture = make_capture(events);
+
+        let filtered = extract_file_paths(&capture, None);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].path, "/etc/config");
+    }
+
+    #[test]
+    fn precreate_includes_all_failed_paths() {
+        let events = vec![
+            make_event(4, "/tmp/gone", -2, 0),
+            make_event(257, "/tmp/also_gone", -2, 0),
+        ];
+        let capture = make_capture(events);
+
+        let all = extract_file_paths(&capture, Some(MissingFilesStrategy::Precreate));
+        assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn parentdir_includes_all_failed_paths() {
+        let events = vec![
+            make_event(4, "/tmp/gone", -2, 0),
+            make_event(257, "/tmp/also_gone", -2, 0),
+        ];
+        let capture = make_capture(events);
+
+        let all = extract_file_paths(&capture, Some(MissingFilesStrategy::Parentdir));
+        assert_eq!(all.len(), 2);
+    }
 }
 
 /// Parse `getcap` output into a list of capability names.

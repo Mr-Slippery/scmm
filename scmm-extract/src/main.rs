@@ -13,14 +13,14 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result};
-use clap::{Parser, ValueEnum};
-
-use scmm_common::policy::OnMissing;
+use clap::Parser;
 
 mod interactive;
 mod parser;
 mod strace_parser;
 mod yaml;
+
+use interactive::MissingFilesStrategy;
 
 /// SysCallMeMaybe (SCMM) - Policy extractor
 ///
@@ -47,13 +47,25 @@ struct Args {
     #[arg(long)]
     categories: Option<String>,
 
-    /// Default strategy for files that may not exist at enforcement time.
-    /// Controls what the enforcer does when a path in the policy doesn't exist:
+    /// Strategy for read-only file paths that may not exist at enforcement time.
+    /// Default: skip (exclude all-failed paths from policy; keep successful ones
+    /// with on_missing: skip).
     ///   precreate  - enforcer pre-creates the file for precise Landlock targeting
     ///   parentdir  - grant restricted rights on parent directory (no read_file)
-    ///   skip       - silently drop the rule
+    ///   skip       - exclude all-failed paths; successful paths get on_missing: skip
+    ///   ask        - prompt interactively for each rule
     #[arg(long, value_enum)]
     missing_files: Option<MissingFilesStrategy>,
+
+    /// Strategy for create-intent paths (files the app creates) that may not
+    /// exist at enforcement time.
+    /// Default: precreate.
+    ///   precreate  - enforcer pre-creates the file for precise Landlock targeting
+    ///   parentdir  - grant restricted rights on parent directory (no read_file)
+    ///   skip       - exclude from policy entirely
+    ///   ask        - prompt interactively for each rule
+    #[arg(long, value_enum)]
+    created_files: Option<MissingFilesStrategy>,
 
     /// Show statistics without generating policy
     #[arg(long)]
@@ -67,24 +79,6 @@ struct Args {
     /// Verbose output
     #[arg(short, long, action = clap::ArgAction::Count)]
     verbose: u8,
-}
-
-/// Strategy for handling missing files at enforcement time
-#[derive(Debug, Clone, Copy, ValueEnum)]
-enum MissingFilesStrategy {
-    Precreate,
-    Parentdir,
-    Skip,
-}
-
-impl MissingFilesStrategy {
-    fn to_on_missing(self) -> OnMissing {
-        match self {
-            MissingFilesStrategy::Precreate => OnMissing::Precreate,
-            MissingFilesStrategy::Parentdir => OnMissing::Parentdir,
-            MissingFilesStrategy::Skip => OnMissing::Skip,
-        }
-    }
 }
 
 fn main() -> ExitCode {
@@ -128,11 +122,36 @@ fn run(args: Args) -> Result<()> {
             .to_string()
     });
 
-    let missing_files_override = args.missing_files.map(|s| s.to_on_missing());
+    let missing_files = args.missing_files;
+    let created_files = args.created_files;
+
+    if args.non_interactive {
+        if missing_files == Some(MissingFilesStrategy::Ask) {
+            anyhow::bail!(
+                "--missing-files ask requires interactive mode (remove --non-interactive)"
+            );
+        }
+        if created_files == Some(MissingFilesStrategy::Ask) {
+            anyhow::bail!(
+                "--created-files ask requires interactive mode (remove --non-interactive)"
+            );
+        }
+    }
+
     let policy = if args.non_interactive {
-        interactive::run_non_interactive_extraction(&capture, &policy_name, missing_files_override)?
+        interactive::run_non_interactive_extraction(
+            &capture,
+            &policy_name,
+            missing_files,
+            created_files,
+        )?
     } else {
-        interactive::run_interactive_extraction(&capture, &policy_name, missing_files_override)?
+        interactive::run_interactive_extraction(
+            &capture,
+            &policy_name,
+            missing_files,
+            created_files,
+        )?
     };
 
     // Write YAML policy

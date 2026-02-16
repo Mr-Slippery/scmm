@@ -1,6 +1,6 @@
 //! Capture file format definitions
 
-#[cfg(not(feature = "no_std"))]
+#[cfg(feature = "std")]
 use serde::{Deserialize, Serialize};
 
 use crate::{CAPTURE_MAGIC, CAPTURE_VERSION};
@@ -71,7 +71,7 @@ pub mod capture_flags {
 }
 
 /// Metadata about the captured session
-#[cfg(not(feature = "no_std"))]
+#[cfg(feature = "std")]
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct CaptureMetadata {
     /// Hostname where capture was made
@@ -94,7 +94,7 @@ pub struct CaptureMetadata {
 }
 
 /// Information about a process
-#[cfg(not(feature = "no_std"))]
+#[cfg(feature = "std")]
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ProcessInfo {
     /// Process ID
