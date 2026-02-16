@@ -6,7 +6,7 @@ A Linux syscall recording and sandboxing suite. Record what syscalls a program m
 
 SCMM uses a four-step pipeline: **record** -> **extract** -> **compile** -> **enforce**, with an optional **merge** step for combining policies.
 
-1. **Record** -- eBPF tracepoints capture every syscall the target process makes (spawn a command or attach to a running process)
+1. **Record** -- eBPF tracepoints capture every syscall the target process makes (spawn a command or attach to a running process). Alternatively, `strace` output can be used in place of eBPF recording.
 2. **Extract** -- an interactive (or automatic) step turns raw captures into a human-readable YAML policy
 3. **Merge** *(optional)* -- combine multiple policies into one (e.g. from different runs of the same binary)
 4. **Compile** -- the YAML policy is compiled into a binary format with Seccomp BPF bytecode and Landlock rule tables
@@ -61,11 +61,14 @@ scmm-merge -i policy1.yaml -i policy2.yaml -o merged.yaml
 # Build everything (eBPF + userspace + set capabilities)
 ./build.sh
 
+# Build userspace tools only (no nightly/bpf-linker needed)
+cargo build --workspace --exclude scmm-ebpf --release
+
 # Run checks (clippy + fmt)
 ./check.sh
 ```
 
-`build.sh` installs the nightly toolchain and `bpf-linker` if needed, builds the eBPF programs and userspace tools in release mode, and sets `cap_bpf,cap_perfmon,cap_dac_read_search` on `scmm-record` so it can run without sudo.
+`build.sh` installs the nightly toolchain and `bpf-linker` if needed, builds the eBPF programs and userspace tools in release mode, and sets `cap_bpf,cap_perfmon,cap_dac_read_search` on `scmm-record` so it can run without sudo. The userspace-only build is useful when you only need the extract/compile/enforce tools (e.g. when using strace for recording instead of eBPF).
 
 ## Tool Reference
 
@@ -115,13 +118,13 @@ When attaching to a running process, recording starts from the attach point -- e
 
 ### scmm-extract
 
-Extracts a YAML policy from a capture file. By default runs interactively, prompting you to generalize paths and choose syscall handling per category.
+Extracts a YAML policy from a capture file or strace output. The input format is auto-detected: binary `.scmm-cap` files (from `scmm-record`) and text strace output (from `strace -f -o`) are both supported. By default runs interactively, prompting you to generalize paths and choose syscall handling per category.
 
 ```
 Usage: scmm-extract [OPTIONS] -i <INPUT>
 
 Options:
-  -i, --input <PATH>           Input capture file
+  -i, --input <PATH>           Input capture file (.scmm-cap) or strace output
   -o, --output <PATH>          Output YAML policy [default: policy.scmm.yaml]
       --name <NAME>            Policy name
       --non-interactive        Auto-select defaults without prompting
@@ -212,7 +215,7 @@ Usage: scmm-enforce [OPTIONS] -p <POLICY> -- <COMMAND>...
 Options:
   -p, --policy <PATH>          Compiled policy file
   -m, --mode <MODE>            Enforcement mode [default: standard]
-      --categories <LIST>      Enforce specific categories only (comma-separated)
+      --categories <LIST>      Enforce specific categories only (comma-separated: files,network,process,memory,ipc)
   -v, --verbose                Increase verbosity
 ```
 
@@ -248,14 +251,18 @@ metadata:
   name: my-app-policy
   description: "Sandbox policy for my application"
   target_executable: my-program
+  generated_from: capture.scmm-cap  # source capture file (auto-set)
+  generated_at: "2026-02-16T12:00:00Z"  # generation timestamp (auto-set)
 
 settings:
-  default_action: deny    # deny | allow | log | kill
+  default_action: deny    # deny | allow | log | kill | trap
   log_denials: true
   arch: x86_64
   run_as:                  # optional: drop privileges before exec
     user: nobody
     group: nogroup
+    uid: 65534             # numeric fallback if name resolution fails
+    gid: 65534
 
 syscalls:
   - name: read
@@ -300,12 +307,14 @@ network:
 | `read_dir` | List directory contents |
 | `make_reg` | Create a regular file |
 | `make_dir` | Create a directory |
-| `remove_file` | Delete a file |
-| `remove_dir` | Delete a directory |
-| `truncate` | Truncate a file |
+| `make_char` | Create a character device |
+| `make_block` | Create a block device |
 | `make_sock` | Create a Unix socket |
 | `make_fifo` | Create a FIFO |
 | `make_sym` | Create a symbolic link |
+| `remove_file` | Delete a file |
+| `remove_dir` | Delete a directory |
+| `truncate` | Truncate a file (Landlock ABI V3+) |
 | `refer` | Link/rename across directories |
 
 ### Handling non-existent paths (`on_missing`)
@@ -317,6 +326,30 @@ When a path in the policy doesn't exist at enforcement time, Landlock can't atta
 | `precreate` | The enforcer creates an empty file before applying the Landlock rule, giving precise access control. Default for paths with `make_reg`. |
 | `parentdir` | Grants restricted rights (write, no read) on the parent directory so the file can be created. |
 | `skip` | Silently drops the rule. Default for paths without `make_reg`. |
+
+## Using strace Instead of eBPF
+
+If you don't have the kernel capabilities for eBPF recording (or prefer not to build the eBPF components), you can use `strace` to capture syscalls and feed the output directly to `scmm-extract`:
+
+```bash
+# Record with strace (use -f to follow forks)
+strace -f -o trace.log -- ./my-program arg1 arg2
+
+# Extract, compile, enforce as usual
+scmm-extract -i trace.log -o policy.yaml --non-interactive
+scmm-compile -i policy.yaml -o policy.scmm-pol
+scmm-enforce -p policy.scmm-pol -- ./my-program arg1 arg2
+```
+
+The input format is auto-detected. Strace input supports:
+- Single-process and multi-process (`-f`) output
+- Unfinished/resumed syscall lines from concurrent threads
+- Open flag parsing (`O_RDONLY|O_CREAT|O_TRUNC` etc.) for correct Landlock access inference
+
+Limitations compared to eBPF recording:
+- Timestamps are synthetic (1ms increments), not real
+- No process tree or environment metadata in the capture
+- `strace` itself adds overhead via ptrace (eBPF is lower overhead)
 
 ## Privilege Requirements
 
