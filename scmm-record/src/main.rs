@@ -60,8 +60,8 @@ struct Args {
     #[arg(long)]
     all: bool,
 
-    /// Follow child processes (fork/clone)
-    #[arg(short = 'f', long)]
+    /// Follow child processes (fork/clone) [default: true]
+    #[arg(short = 'f', long, default_value_t = true)]
     follow_forks: bool,
 
     /// Attach to an existing process by PID (mutually exclusive with command)
