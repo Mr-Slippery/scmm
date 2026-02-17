@@ -105,6 +105,10 @@ fn run(args: Args) -> Result<ExitCode> {
 
     let has_run_as = policy.run_as_uid.is_some() || policy.run_as_gid.is_some();
     let has_caps = policy.capabilities != 0;
+    info!(
+        "run_as: uid={:?}, gid={:?}, has_run_as={}, has_caps={}",
+        policy.run_as_uid, policy.run_as_gid, has_run_as, has_caps
+    );
 
     // Apply capabilities if requested (requires root).
     // When combined with run_as, we set caps now (as root), then use PR_SET_KEEPCAPS
@@ -125,11 +129,11 @@ fn run(args: Args) -> Result<ExitCode> {
                     "Landlock not available. Strict mode requires kernel 5.13+ with Landlock enabled."
                 );
             }
-            landlock::apply(&policy)?;
+            landlock::apply(&policy, has_run_as)?;
         }
         EnforcementMode::Standard => {
             if caps.landlock {
-                landlock::apply(&policy)?;
+                landlock::apply(&policy, has_run_as)?;
             } else {
                 warn!("Landlock not available - path-based restrictions will not be enforced");
                 warn!("Consider upgrading to kernel 5.13+ for full protection");
@@ -264,7 +268,7 @@ fn drop_privileges(uid: u32, gid: u32, cap_mask: u64) -> Result<()> {
         return Ok(());
     }
 
-    // Set supplementary groups
+    // Set supplementary groups and fix environment for the target user
     match nix::unistd::User::from_uid(target_uid) {
         Ok(Some(user)) => {
             let cname =
@@ -281,8 +285,18 @@ fn drop_privileges(uid: u32, gid: u32, cap_mask: u64) -> Result<()> {
                     nix::unistd::setgroups(&[target_gid]).context("setgroups failed")?;
                 }
             }
+            // Update environment so child processes see the correct HOME/USER.
+            // Without this, programs run under sudo still see HOME=/root.
+            std::env::set_var("HOME", &user.dir);
+            std::env::set_var("USER", &user.name);
+            info!("Set HOME={}, USER={}", user.dir.display(), user.name);
         }
-        _ => {
+        Ok(None) => {
+            warn!("No passwd entry for uid={}, cannot set HOME/USER", uid);
+            nix::unistd::setgroups(&[target_gid]).context("setgroups failed")?;
+        }
+        Err(e) => {
+            warn!("Failed to look up uid={}: {}, cannot set HOME/USER", uid, e);
             nix::unistd::setgroups(&[target_gid]).context("setgroups failed")?;
         }
     }

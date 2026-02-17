@@ -64,7 +64,7 @@ fn format_access(access: BitFlags<AccessFs>) -> String {
 }
 
 /// Apply Landlock rules from policy
-pub fn apply(policy: &LoadedPolicy) -> Result<()> {
+pub fn apply(policy: &LoadedPolicy, has_run_as: bool) -> Result<()> {
     if policy.landlock_rules.is_empty() {
         info!("No Landlock rules in policy, skipping Landlock enforcement");
         return Ok(());
@@ -161,6 +161,22 @@ pub fn apply(policy: &LoadedPolicy) -> Result<()> {
                     Err(e) => warn!("  FAIL implicit {}: {}", real_str, e),
                 }
                 break; // Only need to add it once (all paths resolve to the same file)
+            }
+        }
+    }
+
+    // Phase 2c: When run_as is used, add implicit read access for NSS files
+    // so the enforcer can look up the target user after Landlock is in effect.
+    if has_run_as {
+        let nss_read = AccessFs::ReadFile;
+        for nss_path in &["/etc/passwd", "/etc/group", "/etc/nsswitch.conf"] {
+            if let Ok(path_fd) = PathFd::new(*nss_path) {
+                match (&mut ruleset_created).add_rule(
+                    PathBeneath::new(path_fd, nss_read).set_compatibility(CompatLevel::BestEffort),
+                ) {
+                    Ok(_) => info!("  implicit: allow {} [read_file] (run_as)", nss_path),
+                    Err(e) => warn!("  FAIL implicit {}: {}", nss_path, e),
+                }
             }
         }
     }
