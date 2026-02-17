@@ -282,9 +282,7 @@ settings:
   log_denials: true
   arch: x86_64
   run_as:                  # optional: drop privileges before exec
-    user: nobody
-    group: nogroup
-    uid: 65534             # numeric fallback if name resolution fails
+    uid: 65534
     gid: 65534
 
 syscalls:
@@ -386,7 +384,36 @@ Limitations compared to eBPF recording:
 | `scmm-compile` | None |
 | `scmm-enforce` | None (sets `NO_NEW_PRIVS` via `prctl`) |
 
-When the policy includes `capabilities`, the enforcer raises them in the ambient set and skips `NO_NEW_PRIVS`. This requires `CAP_SYS_ADMIN` on the enforcer binary.
+### Capabilities and `run_as`
+
+When a policy includes `capabilities` (e.g. `CAP_NET_RAW` for `ping`), the enforcer raises them in the ambient set so they are inherited across `execve`. This requires skipping `NO_NEW_PRIVS`, which in turn requires `CAP_SYS_ADMIN` for seccomp filter loading. Run with `sudo`:
+
+```bash
+sudo scmm-enforce -p policy.scmm-pol -- ping -c 1 127.0.0.1
+```
+
+When both `run_as` and `capabilities` are set, the enforcer uses `PR_SET_KEEPCAPS` to preserve the permitted capability set across the `setuid` privilege drop, then re-raises the requested capabilities in the ambient set. The sequence is:
+
+1. Raise capabilities (as root)
+2. Apply Landlock (as root, to open any path)
+3. `PR_SET_KEEPCAPS` + `setuid`/`setgid` (drop to target user)
+4. Re-raise capabilities from the retained permitted set
+5. Apply seccomp filter (requires `CAP_SYS_ADMIN` since `NO_NEW_PRIVS` is skipped)
+6. `execve` into the target (ambient caps are inherited)
+
+The recorder automatically captures the target process's UID/GID, and the extractor populates `run_as` in the policy. This means the full pipeline works without manual policy editing:
+
+```bash
+# Record ping (recorder captures uid/gid of the target process)
+scmm-record -f -o cap.scmm-cap -- ping -c 1 127.0.0.1
+
+# Extract (auto-detects CAP_NET_RAW and sets run_as from capture)
+scmm-extract --non-interactive --missing-files skip -i cap.scmm-cap -o policy.yaml
+
+# Compile and enforce
+scmm-compile -i policy.yaml -o policy.scmm-pol
+sudo scmm-enforce -p policy.scmm-pol -- ping -c 1 127.0.0.1
+```
 
 ## Testing
 

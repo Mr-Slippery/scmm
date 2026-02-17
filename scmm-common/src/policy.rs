@@ -148,16 +148,10 @@ pub struct PolicyMetadata {
 #[cfg(feature = "std")]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RunAs {
-    /// Username (resolved to UID at compile time)
-    #[serde(default)]
-    pub user: Option<String>,
-    /// Numeric UID (used directly, or as fallback if user name resolution fails)
+    /// Numeric UID
     #[serde(default)]
     pub uid: Option<u32>,
-    /// Group name (resolved to GID at compile time)
-    #[serde(default)]
-    pub group: Option<String>,
-    /// Numeric GID (used directly, or as fallback if group name resolution fails)
+    /// Numeric GID
     #[serde(default)]
     pub gid: Option<u32>,
 }

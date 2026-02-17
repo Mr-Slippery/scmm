@@ -104,13 +104,12 @@ fn run(args: Args) -> Result<ExitCode> {
     );
 
     let has_run_as = policy.run_as_uid.is_some() || policy.run_as_gid.is_some();
+    let has_caps = policy.capabilities != 0;
 
-    // Apply capabilities if requested (requires root)
-    if policy.capabilities != 0 {
-        if has_run_as {
-            warn!("run_as with capabilities: ambient capabilities will be cleared by setuid");
-            warn!("File capabilities on the target binary will still be effective");
-        }
+    // Apply capabilities if requested (requires root).
+    // When combined with run_as, we set caps now (as root), then use PR_SET_KEEPCAPS
+    // to retain them across the setuid transition, and re-raise ambient caps afterward.
+    if has_caps {
         apply_capabilities(policy.capabilities)?;
     }
 
@@ -140,8 +139,8 @@ fn run(args: Args) -> Result<ExitCode> {
     }
 
     // Drop privileges AFTER Landlock but BEFORE seccomp.
-    // setuid from root clears ambient capabilities, but file caps on
-    // the target binary (xattr) remain effective.
+    // When capabilities are requested, PR_SET_KEEPCAPS preserves the Permitted
+    // set across the setuid transition, then we re-raise Inheritable + Ambient.
     if has_run_as {
         let uid = policy
             .run_as_uid
@@ -149,20 +148,21 @@ fn run(args: Args) -> Result<ExitCode> {
         let gid = policy
             .run_as_gid
             .unwrap_or_else(|| nix::unistd::getgid().as_raw());
-        drop_privileges(uid, gid)?;
+        drop_privileges(uid, gid, if has_caps { policy.capabilities } else { 0 })?;
     }
 
     // Set NO_NEW_PRIVS before applying seccomp (required by kernel unless we have CAP_SYS_ADMIN).
-    // After drop_privileges, ambient caps are already cleared, so NO_NEW_PRIVS is safe.
-    // Without run_as but with caps, we skip NO_NEW_PRIVS to preserve ambient caps.
-    if has_run_as || policy.capabilities == 0 {
-        set_no_new_privs()?;
-    } else {
-        info!("Skipping NO_NEW_PRIVS to preserve Ambient capabilities");
+    // When capabilities are requested (with or without run_as), we skip NO_NEW_PRIVS
+    // so ambient caps survive into execve. This requires CAP_SYS_ADMIN for seccomp loading.
+    if has_caps {
+        info!("Skipping NO_NEW_PRIVS to preserve Ambient capabilities across execve");
         if !caps::has_cap(None, CapSet::Effective, caps::Capability::CAP_SYS_ADMIN).unwrap_or(false)
         {
             warn!("CAP_SYS_ADMIN is missing. Seccomp filter loading will likely fail without NO_NEW_PRIVS.");
+            warn!("Ensure scmm-enforce has file capability cap_sys_admin+ep or is run with sudo.");
         }
+    } else {
+        set_no_new_privs()?;
     }
 
     // All logging MUST happen before seccomp is applied. After the seccomp
@@ -244,9 +244,13 @@ fn set_no_new_privs() -> Result<()> {
 /// If the target uid/gid already match the current process, this is a no-op
 /// (avoids EPERM from setgroups/setgid/setuid which require CAP_SETGID/CAP_SETUID).
 ///
-/// Order: setgroups → setgid → setuid (must setgid before setuid,
-/// because after setuid we may lose permission to call setgid).
-fn drop_privileges(uid: u32, gid: u32) -> Result<()> {
+/// When `cap_mask != 0`, uses `PR_SET_KEEPCAPS` to retain the Permitted capability
+/// set across the setuid transition, then re-raises Inheritable + Ambient caps.
+/// Without this, the kernel clears all capability sets when transitioning from
+/// uid 0 to non-zero.
+///
+/// Order: setgroups → setgid → PR_SET_KEEPCAPS → setuid → re-raise caps
+fn drop_privileges(uid: u32, gid: u32, cap_mask: u64) -> Result<()> {
     let current_uid = nix::unistd::getuid().as_raw();
     let current_gid = nix::unistd::getgid().as_raw();
     let target_uid = Uid::from_raw(uid);
@@ -284,9 +288,31 @@ fn drop_privileges(uid: u32, gid: u32) -> Result<()> {
     }
 
     nix::unistd::setgid(target_gid).context("setgid failed")?;
-    nix::unistd::setuid(target_uid).context("setuid failed")?;
 
+    // If we need to preserve capabilities across the UID transition, set KEEPCAPS.
+    // Without this, the kernel clears Permitted/Effective/Ambient when going from
+    // root (uid 0) to non-root.
+    if cap_mask != 0 && current_uid == 0 && uid != 0 {
+        info!("Setting PR_SET_KEEPCAPS to preserve capabilities across setuid");
+        let ret = unsafe { libc::prctl(libc::PR_SET_KEEPCAPS, 1, 0, 0, 0) };
+        if ret != 0 {
+            anyhow::bail!(
+                "Failed to set PR_SET_KEEPCAPS: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+    }
+
+    nix::unistd::setuid(target_uid).context("setuid failed")?;
     info!("Dropped privileges to uid={}, gid={}", uid, gid);
+
+    // After setuid with KEEPCAPS, the Permitted set is retained but Effective and
+    // Ambient are cleared. Re-raise the requested caps in all three sets.
+    if cap_mask != 0 && current_uid == 0 && uid != 0 {
+        info!("Re-raising capabilities after privilege drop");
+        apply_capabilities(cap_mask).context("Failed to re-raise capabilities after setuid")?;
+    }
+
     Ok(())
 }
 
@@ -309,7 +335,11 @@ fn exec_command(command: &[String]) -> Result<ExitCode> {
     ))
 }
 
-/// Apply requested capabilities to the Ambient set
+/// Apply requested capabilities to the Effective, Inheritable, and Ambient sets.
+///
+/// After PR_SET_KEEPCAPS + setuid, only the Permitted set is retained.
+/// This function raises the requested caps in Effective (needed to raise
+/// Inheritable/Ambient), then Inheritable, then Ambient.
 fn apply_capabilities(mask: u64) -> Result<()> {
     if mask == 0 {
         return Ok(());
@@ -330,29 +360,31 @@ fn apply_capabilities(mask: u64) -> Result<()> {
 
     info!("Requested capabilities: {:?}", to_raise);
 
-    // 1. Ensure permitted/effective
-    let current = caps::read(None, CapSet::Effective)?;
-    let missing: CapsHashSet = to_raise.difference(&current).cloned().collect();
+    // 1. Verify caps are in the Permitted set
+    let permitted = caps::read(None, CapSet::Permitted)?;
+    let missing: CapsHashSet = to_raise.difference(&permitted).cloned().collect();
 
     if !missing.is_empty() {
         warn!(
-            "Missing effective capabilities: {:?}. scmm-enforce should be run as root.",
+            "Missing permitted capabilities: {:?}. scmm-enforce should be run as root or with appropriate file caps.",
             missing
         );
-        // Attempting to proceed anyway, but it will likely fail to set ambient
     }
 
-    // 2. Add to Inheritable
-    // We must read current inheritable, add our caps, and set it back
+    // 2. Raise in Effective set (needed to modify Inheritable/Ambient)
+    let mut effective = caps::read(None, CapSet::Effective)?;
+    effective.extend(to_raise.iter().cloned());
+    caps::set(None, CapSet::Effective, &effective)
+        .context("Failed to set Effective capabilities")?;
+
+    // 3. Add to Inheritable
     let mut inheritable = caps::read(None, CapSet::Inheritable)?;
     inheritable.extend(to_raise.iter().cloned());
     caps::set(None, CapSet::Inheritable, &inheritable)
         .context("Failed to set Inheritable capabilities")?;
 
-    // 3. Add to Ambient
-    // Loop and raise each one
+    // 4. Add to Ambient (each must be raised individually)
     for cap in to_raise {
-        // We use the 'raise' function which maps to PR_CAP_AMBIENT_RAISE
         if let Err(e) = caps::raise(None, CapSet::Ambient, cap) {
             warn!("Failed to raise ambient capability {:?}: {}", cap, e);
             warn!("Ensure you are running a kernel with Ambient Capabilities support (4.3+)");

@@ -196,20 +196,16 @@ pub fn validate(policy: &YamlPolicy, arch: &str) -> Result<Vec<String>> {
                     .to_string(),
             );
         }
-        if run_as.user.is_none() && run_as.uid.is_none() {
-            warnings.push("run_as specified but no user or uid provided".to_string());
+        if run_as.uid.is_none() {
+            warnings.push("run_as specified but no uid provided".to_string());
         }
-        if run_as.group.is_none()
-            && run_as.gid.is_none()
-            && run_as.user.is_none()
-            && run_as.uid.is_none()
-        {
+        if run_as.uid.is_none() && run_as.gid.is_none() {
             warnings.push("run_as specified but completely empty".to_string());
         }
         if !policy.capabilities.is_empty() {
             warnings.push(
-                "run_as with capabilities: ambient capabilities will be cleared by setuid. \
-                 File capabilities on the target binary will still be effective."
+                "run_as with capabilities: the enforcer requires CAP_SYS_ADMIN (e.g. via sudo) \
+                 to load seccomp filters without NO_NEW_PRIVS."
                     .to_string(),
             );
         }

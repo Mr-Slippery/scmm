@@ -79,6 +79,28 @@ fn read_proc_cmdline(pid: u32) -> Vec<String> {
     }
 }
 
+/// Read the effective UID/GID of a process from /proc/<pid>/status
+fn read_proc_uid_gid(pid: u32) -> Option<(u32, u32)> {
+    let status = std::fs::read_to_string(format!("/proc/{}/status", pid)).ok()?;
+    let mut uid = None;
+    let mut gid = None;
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("Uid:") {
+            // Format: real effective saved fs
+            let fields: Vec<&str> = rest.split_whitespace().collect();
+            if fields.len() >= 2 {
+                uid = fields[1].parse().ok(); // effective UID
+            }
+        } else if let Some(rest) = line.strip_prefix("Gid:") {
+            let fields: Vec<&str> = rest.split_whitespace().collect();
+            if fields.len() >= 2 {
+                gid = fields[1].parse().ok(); // effective GID
+            }
+        }
+    }
+    Some((uid?, gid?))
+}
+
 /// Recorder manages eBPF programs and event collection
 pub struct Recorder {
     /// Loaded eBPF programs
@@ -224,8 +246,15 @@ impl Recorder {
                 self.add_pid(pid)?;
                 self.tracked_pids.insert(pid, true);
 
-                // Store command in capture metadata
+                // Store command and target uid/gid in capture metadata
                 self.writer.set_command(command.to_vec());
+                let (uid, gid) = run_as.unwrap_or_else(|| {
+                    (
+                        nix::unistd::getuid().as_raw(),
+                        nix::unistd::getgid().as_raw(),
+                    )
+                });
+                self.writer.set_uid_gid(uid, gid);
 
                 // Store child PID for reaping
                 self.child_pid = Some(pid);
@@ -257,6 +286,11 @@ impl Recorder {
         let cmdline = read_proc_cmdline(pid);
         self.writer.set_command(cmdline);
         self.writer.set_attached(pid);
+
+        // Read target process uid/gid from /proc
+        if let Some((uid, gid)) = read_proc_uid_gid(pid) {
+            self.writer.set_uid_gid(uid, gid);
+        }
 
         // We did NOT fork this process — child_pid stays None
         // This tells run() to use process-alive polling instead of waitpid

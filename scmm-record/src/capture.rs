@@ -87,6 +87,12 @@ impl CaptureWriter {
         self.metadata.command = command;
     }
 
+    /// Set the target process UID/GID
+    pub fn set_uid_gid(&mut self, uid: u32, gid: u32) {
+        self.metadata.uid = Some(uid);
+        self.metadata.gid = Some(gid);
+    }
+
     /// Mark this capture as attached to an existing process
     pub fn set_attached(&mut self, pid: u32) {
         self.metadata.attached = true;

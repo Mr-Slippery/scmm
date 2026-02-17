@@ -9,10 +9,11 @@ use console::style;
 use dialoguer::{Input, MultiSelect, Select};
 
 use scmm_common::{
+    capture::CaptureMetadata,
     categories::x86_64 as syscalls,
     policy::{
         landlock_access, Action, FilesystemRule, FilesystemRules, NetworkRule, NetworkRules,
-        OnMissing, PolicyMetadata, PolicySettings, SyscallRule, YamlPolicy,
+        OnMissing, PolicyMetadata, PolicySettings, RunAs, SyscallRule, YamlPolicy,
     },
     ArgType, SyscallCategory,
 };
@@ -92,6 +93,16 @@ fn resolve_on_missing(
     }
 }
 
+/// Build a RunAs from the capture metadata's uid/gid, if present.
+fn run_as_from_metadata(meta: &CaptureMetadata) -> Option<RunAs> {
+    let uid = meta.uid?;
+    let gid = meta.gid?;
+    Some(RunAs {
+        uid: Some(uid),
+        gid: Some(gid),
+    })
+}
+
 /// Run non-interactive extraction with sensible defaults.
 ///
 /// Auto-selects: deny-by-default, allow all observed syscalls,
@@ -122,6 +133,7 @@ pub fn run_non_interactive_extraction(
     };
 
     policy.settings.default_action = Action::Deny;
+    policy.settings.run_as = run_as_from_metadata(&capture.metadata);
 
     println!("Non-interactive extraction (auto-selecting defaults)");
     println!();
@@ -195,6 +207,8 @@ pub fn run_interactive_extraction(
         filesystem: FilesystemRules::default(),
         network: NetworkRules::default(),
     };
+
+    policy.settings.run_as = run_as_from_metadata(&capture.metadata);
 
     println!("{}", style("Interactive Policy Extraction").bold().cyan());
     println!();
@@ -1245,6 +1259,8 @@ mod tests {
                 working_dir: "/tmp".into(),
                 environment: Vec::new(),
                 root_pid: 1,
+                uid: None,
+                gid: None,
                 attached: false,
                 processes: Vec::new(),
             },

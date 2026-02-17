@@ -86,6 +86,12 @@ pub struct CaptureMetadata {
     pub environment: Vec<(String, String)>,
     /// Root process ID
     pub root_pid: u32,
+    /// Effective UID of the target process
+    #[serde(default)]
+    pub uid: Option<u32>,
+    /// Effective GID of the target process
+    #[serde(default)]
+    pub gid: Option<u32>,
     /// Whether recording was done by attaching to an existing process (vs spawning)
     #[serde(default)]
     pub attached: bool,

@@ -144,6 +144,8 @@ pub fn parse_strace(path: &Path) -> Result<ParsedCapture> {
         root_pid,
         attached: true,
         processes: Vec::new(),
+        uid: None,
+        gid: None,
     };
 
     println!(

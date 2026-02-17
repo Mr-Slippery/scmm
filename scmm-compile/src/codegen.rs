@@ -1,6 +1,6 @@
 //! Code generation for compiled policies
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use byteorder::{LittleEndian, WriteBytesExt};
 use tracing::warn;
 
@@ -144,7 +144,7 @@ pub fn compile(policy: &YamlPolicy, target_arch: &str) -> Result<Vec<u8>> {
         flags |= policy_flags::HAS_RUN_AS;
 
         if !policy.capabilities.is_empty() {
-            warn!("run_as with capabilities: ambient capabilities will be cleared by setuid. File capabilities on the target binary will still be effective.");
+            warn!("run_as with capabilities: the enforcer requires CAP_SYS_ADMIN (e.g. via sudo) to load seccomp filters without NO_NEW_PRIVS.");
         }
     }
 
@@ -757,73 +757,19 @@ fn generate_capabilities(policy: &YamlPolicy) -> Result<Vec<u8>> {
 
 // ── run_as resolution ──────────────────────────────────────────────────
 
-/// Resolve uid from RunAs config: name takes precedence, numeric fallback.
 fn resolve_uid(run_as: &RunAs) -> Result<u32> {
-    if let Some(ref name) = run_as.user {
-        match nix::unistd::User::from_name(name) {
-            Ok(Some(user)) => return Ok(user.uid.as_raw()),
-            Ok(None) => {
-                if let Some(uid) = run_as.uid {
-                    warn!("User '{}' not found, using numeric uid {}", name, uid);
-                    return Ok(uid);
-                }
-                bail!("User '{}' not found and no numeric uid specified", name);
-            }
-            Err(e) => {
-                if let Some(uid) = run_as.uid {
-                    warn!(
-                        "Failed to look up user '{}': {}, using numeric uid {}",
-                        name, e, uid
-                    );
-                    return Ok(uid);
-                }
-                bail!("Failed to look up user '{}': {}", name, e);
-            }
-        }
-    }
-    if let Some(uid) = run_as.uid {
-        return Ok(uid);
-    }
-    bail!("run_as specified but no user or uid provided");
+    run_as.uid.context("run_as specified but no uid provided")
 }
 
-/// Resolve gid from RunAs config: name takes precedence, numeric fallback.
 fn resolve_gid(run_as: &RunAs) -> Result<u32> {
-    if let Some(ref name) = run_as.group {
-        match nix::unistd::Group::from_name(name) {
-            Ok(Some(group)) => return Ok(group.gid.as_raw()),
-            Ok(None) => {
-                if let Some(gid) = run_as.gid {
-                    warn!("Group '{}' not found, using numeric gid {}", name, gid);
-                    return Ok(gid);
-                }
-                bail!("Group '{}' not found and no numeric gid specified", name);
-            }
-            Err(e) => {
-                if let Some(gid) = run_as.gid {
-                    warn!(
-                        "Failed to look up group '{}': {}, using numeric gid {}",
-                        name, e, gid
-                    );
-                    return Ok(gid);
-                }
-                bail!("Failed to look up group '{}': {}", name, e);
-            }
-        }
-    }
     if let Some(gid) = run_as.gid {
         return Ok(gid);
     }
-    // If no group specified but user was, use the user's primary group
-    if let Some(ref name) = run_as.user {
-        if let Ok(Some(user)) = nix::unistd::User::from_name(name) {
-            return Ok(user.gid.as_raw());
-        }
-    }
+    // If no gid specified, infer from uid's primary group
     if let Some(uid) = run_as.uid {
         if let Ok(Some(user)) = nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid)) {
             return Ok(user.gid.as_raw());
         }
     }
-    bail!("run_as specified but no group or gid provided and could not infer from user");
+    bail!("run_as specified but no gid provided and could not infer from uid");
 }
