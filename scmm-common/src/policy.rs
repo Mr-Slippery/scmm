@@ -123,6 +123,29 @@ pub struct YamlPolicy {
     pub network: NetworkRules,
 }
 
+#[cfg(feature = "std")]
+impl YamlPolicy {
+    /// Sort all collections in the policy for deterministic output and easy diffing.
+    pub fn sort(&mut self) {
+        self.syscalls.sort_by(|a, b| a.name.cmp(&b.name));
+        self.capabilities.sort();
+        self.filesystem.rules.sort_by(|a, b| a.path.cmp(&b.path));
+        for rule in &mut self.filesystem.rules {
+            rule.access.sort();
+        }
+        self.network.outbound.sort_by(|a, b| {
+            a.protocol
+                .cmp(&b.protocol)
+                .then_with(|| a.ports.cmp(&b.ports))
+        });
+        self.network.inbound.sort_by(|a, b| {
+            a.protocol
+                .cmp(&b.protocol)
+                .then_with(|| a.ports.cmp(&b.ports))
+        });
+    }
+}
+
 /// Policy metadata
 #[cfg(feature = "std")]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -105,6 +105,8 @@ fn run(args: Args) -> Result<()> {
 
     // Write output
     info!("Writing merged policy to: {}", args.output.display());
+    let mut merged = merged;
+    merged.sort();
     let yaml = serde_yaml::to_string(&merged).context("Failed to serialize merged policy")?;
 
     let header = "# SysCallMeMaybe (SCMM) Merged Policy File\n\

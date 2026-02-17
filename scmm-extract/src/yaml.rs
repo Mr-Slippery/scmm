@@ -10,7 +10,9 @@ use scmm_common::policy::YamlPolicy;
 
 /// Write policy to YAML file
 pub fn write_policy(path: &Path, policy: &YamlPolicy) -> Result<()> {
-    let yaml = serde_yaml::to_string(policy).context("Failed to serialize policy")?;
+    let mut policy = policy.clone();
+    policy.sort();
+    let yaml = serde_yaml::to_string(&policy).context("Failed to serialize policy")?;
 
     // Add header comment
     let header = r#"# SysCallMeMaybe (SCMM) Policy File
