@@ -343,15 +343,18 @@ fn add_path_rule(
                 }
                 ON_MISSING_PARENTDIR => {
                     // Apply restricted rights on immediate parent directory.
-                    // Only grant parent-dir rights + WriteFile + Truncate.
-                    // Do NOT grant ReadFile — that would let the process read
-                    // ALL files beneath the parent, defeating per-file rules.
+                    // Grant parent-dir rights + WriteFile + Truncate on the parent.
+                    // When the rule has make_reg (file creation intent), also grant
+                    // ReadFile — the process will need to read back files it creates.
                     let mut ancestor_access = parent_rights;
                     if access.contains(AccessFs::WriteFile) {
                         ancestor_access |= AccessFs::WriteFile;
                     }
                     if access.contains(AccessFs::Truncate) {
                         ancestor_access |= AccessFs::Truncate;
+                    }
+                    if access.contains(AccessFs::MakeReg) && access.contains(AccessFs::ReadFile) {
+                        ancestor_access |= AccessFs::ReadFile;
                     }
 
                     if ancestor_access.is_empty() {

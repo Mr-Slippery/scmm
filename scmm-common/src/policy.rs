@@ -280,12 +280,19 @@ pub struct FilesystemRules {
 #[serde(rename_all = "kebab-case")]
 pub enum OnMissing {
     /// Pre-create the file so Landlock can target it precisely
-    #[default]
     Precreate = 0,
     /// Apply restricted rights (write/create only) on the parent directory
     Parentdir = 1,
     /// Skip the rule entirely
+    #[default]
     Skip = 2,
+}
+
+#[cfg(feature = "std")]
+impl OnMissing {
+    fn is_default(&self) -> bool {
+        matches!(self, OnMissing::Skip)
+    }
 }
 
 /// A single filesystem rule
@@ -298,7 +305,7 @@ pub struct FilesystemRule {
     pub access: Vec<String>,
     /// What to do if this path doesn't exist at enforcement time.
     /// Only relevant for rules with make_reg access (files that may be created).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "OnMissing::is_default")]
     pub on_missing: OnMissing,
 }
 

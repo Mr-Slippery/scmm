@@ -36,7 +36,7 @@ pub struct LandlockRule {
     /// Access rights bitmap
     pub access: u64,
     /// Path index (for path rules) or port (for port rules)
-    pub path_or_port: u16,
+    pub path_or_port: u32,
     /// On-missing strategy (0 = precreate, 1 = parentdir, 2 = skip)
     pub on_missing: u8,
 }
@@ -119,7 +119,7 @@ fn parse_landlock_rules(data: &[u8]) -> Result<Vec<LandlockRule>> {
     while cursor.position() < data.len() as u64 {
         let rule_type = cursor.read_u8()?;
         let access = cursor.read_u64::<LittleEndian>()?;
-        let path_or_port = cursor.read_u16::<LittleEndian>()?;
+        let path_or_port = cursor.read_u32::<LittleEndian>()?;
         let on_missing = cursor.read_u8()?;
 
         rules.push(LandlockRule {
@@ -142,7 +142,7 @@ fn parse_path_table(data: &[u8]) -> Result<Vec<String>> {
     let mut paths = Vec::new();
     let mut cursor = std::io::Cursor::new(data);
 
-    let count = cursor.read_u16::<LittleEndian>()? as usize;
+    let count = cursor.read_u32::<LittleEndian>()? as usize;
 
     for _ in 0..count {
         let len = cursor.read_u16::<LittleEndian>()? as usize;

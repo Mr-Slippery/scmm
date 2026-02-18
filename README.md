@@ -146,10 +146,12 @@ The `--missing-files` and `--created-files` flags control how the extractor hand
 |-------|---------------------------|---------------------------|
 | `skip` | Exclude all-failed paths from policy; successful paths get `on_missing: skip` | Exclude from policy entirely |
 | `precreate` | Include all paths with `on_missing: precreate` | Include with `on_missing: precreate` |
-| `parentdir` | Include all paths with `on_missing: parentdir` | Include with `on_missing: parentdir` |
+| `parentdir` | Include all paths with `on_missing: parentdir` | Merge into parent directory rules with combined access rights |
 | `ask` | Prompt interactively per rule | Prompt interactively per rule |
 
 With the default `--missing-files skip`, failed PATH-lookup probes (e.g. `~/.cargo/bin/touch` returning ENOENT before finding `/usr/bin/touch`) are automatically excluded from the policy, keeping it clean.
+
+For programs that create temporary files with random names (e.g. `/tmp/app_XXXXXX.tmp`), use `--created-files parentdir`. Instead of storing each ephemeral file path, the extractor merges them into a single rule on the parent directory (e.g. `/tmp`) with the combined access rights. This produces a much more compact policy that works across runs.
 
 Examples:
 
@@ -303,9 +305,9 @@ filesystem:
       access: [execute, read_file]
     - path: /usr/sbin/nginx
       access: [execute, read_file]
-    - path: /tmp/app.pid
-      access: [make_reg, write_file, truncate]
-      on_missing: precreate    # precreate | parentdir | skip
+    - path: /tmp
+      access: [make_reg, write_file, read_file, truncate]
+      # on_missing: skip (default, omitted)
 
 network:
   allow_loopback: true
@@ -344,11 +346,11 @@ When a path in the policy doesn't exist at enforcement time, Landlock can't atta
 
 | Strategy | Behavior |
 |----------|----------|
+| `skip` | Silently drops the rule (default, omitted from YAML). |
 | `precreate` | The enforcer creates an empty file before applying the Landlock rule, giving precise access control. |
-| `parentdir` | Grants restricted rights (write, no read) on the parent directory so the file can be created. |
-| `skip` | Silently drops the rule. |
+| `parentdir` | Grants restricted rights on the parent directory so the file can be created. When the original rule includes both `make_reg` and `read_file`, read access is also granted on the parent. |
 
-The extractor sets `on_missing` automatically based on the `--missing-files` and `--created-files` flags (see [scmm-extract](#scmm-extract)). Defaults: `precreate` for create-intent paths, `skip` for read-only paths.
+The extractor sets `on_missing` automatically based on the `--missing-files` and `--created-files` flags (see [scmm-extract](#scmm-extract)). Defaults: `precreate` for create-intent paths, `skip` for read-only paths. Since `skip` is the default, it is omitted from the YAML output.
 
 ## Using strace Instead of eBPF
 
@@ -408,7 +410,7 @@ The recorder automatically captures the target process's UID/GID, and the extrac
 scmm-record -f -o cap.scmm-cap -- ping -c 1 127.0.0.1
 
 # Extract (auto-detects CAP_NET_RAW and sets run_as from capture)
-scmm-extract --non-interactive --missing-files skip -i cap.scmm-cap -o policy.yaml
+scmm-extract --non-interactive --created-files parentdir -i cap.scmm-cap -o policy.yaml
 
 # Compile and enforce
 scmm-compile -i policy.yaml -o policy.scmm-pol

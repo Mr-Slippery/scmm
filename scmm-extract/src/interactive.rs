@@ -149,8 +149,12 @@ pub fn run_non_interactive_extraction(
     }
     println!("Allowed {} observed syscalls", syscall_counts.len());
 
-    // Add exact path rules for each observed file
+    // Add path rules for each observed file.
+    // For created files (make_reg) with parentdir strategy, resolve to the parent
+    // directory immediately and merge access rights — the exact file paths are
+    // ephemeral (e.g. random temp names) and won't match on subsequent runs.
     let file_accesses = extract_file_paths(capture, missing_files);
+    let mut created_parentdir_merged: HashMap<String, Vec<String>> = HashMap::new();
     for info in &file_accesses {
         let access = infer_access_rights_with_flags(
             &info.syscall_names,
@@ -160,15 +164,36 @@ pub fn run_non_interactive_extraction(
             info.has_create_open,
             info.has_trunc_open,
         );
-        if let Some(on_missing) =
-            resolve_on_missing(&access, &info.path, missing_files, created_files)?
-        {
-            policy.filesystem.rules.push(FilesystemRule {
-                path: info.path.clone(),
-                access,
-                on_missing,
-            });
+        let is_create = access.contains(&landlock_access::MAKE_REG.to_string());
+        match resolve_on_missing(&access, &info.path, missing_files, created_files)? {
+            Some(OnMissing::Parentdir) if is_create => {
+                let parent = Path::new(&info.path)
+                    .parent()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "/".to_string());
+                let entry = created_parentdir_merged.entry(parent).or_default();
+                for a in &access {
+                    if !entry.contains(a) {
+                        entry.push(a.clone());
+                    }
+                }
+            }
+            Some(on_missing) => {
+                policy.filesystem.rules.push(FilesystemRule {
+                    path: info.path.clone(),
+                    access,
+                    on_missing,
+                });
+            }
+            None => {}
         }
+    }
+    for (parent_path, access) in created_parentdir_merged {
+        policy.filesystem.rules.push(FilesystemRule {
+            path: parent_path,
+            access,
+            on_missing: OnMissing::Skip,
+        });
     }
     println!("Added {} filesystem rules", policy.filesystem.rules.len());
 
@@ -1140,50 +1165,49 @@ fn process_network(policy: &mut YamlPolicy, connections: &[(String, u16, String)
 /// or `which`), then runs `getcap` to read its file capabilities.
 /// Returns a list of capability names like `["CAP_NET_RAW"]`.
 fn detect_file_capabilities(capture: &ParsedCapture) -> Vec<String> {
-    let path = match find_target_binary(capture) {
-        Some(p) => {
-            println!("  Target binary: {}", p);
-            p
-        }
-        None => {
-            println!("  Could not determine target binary path.");
-            return Vec::new();
-        }
-    };
-
-    // Run getcap to read file capabilities
-    let output = match std::process::Command::new("getcap").arg(&path).output() {
-        Ok(o) => o,
-        Err(e) => {
-            println!("  getcap failed to run: {}", e);
-            return Vec::new();
-        }
-    };
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    if stdout.trim().is_empty() {
+    let binaries = find_all_exec_binaries(capture);
+    if binaries.is_empty() {
+        println!("  Could not determine any target binary paths.");
         return Vec::new();
     }
 
-    parse_getcap_output(&stdout)
+    let mut all_caps = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for path in &binaries {
+        // Run getcap to read file capabilities
+        let output = match std::process::Command::new("getcap").arg(path).output() {
+            Ok(o) => o,
+            Err(_) => continue,
+        };
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if !stdout.trim().is_empty() {
+            println!("  {} has capabilities: {}", path, stdout.trim());
+            for cap in parse_getcap_output(&stdout) {
+                if seen.insert(cap.clone()) {
+                    all_caps.push(cap);
+                }
+            }
+        }
+    }
+
+    all_caps
 }
 
-/// Find the resolved path of the target binary from the capture.
-///
-/// Looks for execve paths in the capture events first, then falls back
-/// to resolving the command name via PATH.
-fn find_target_binary(capture: &ParsedCapture) -> Option<String> {
-    // Look for a successful execve/execveat event — arg0 is the path.
-    // Only use events with ret_val == 0 (success), since execvp tries
-    // multiple PATH entries and only one succeeds.
+/// Find all unique resolved paths of binaries exec'd during the capture.
+fn find_all_exec_binaries(capture: &ParsedCapture) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
     for event in &capture.events {
         let name = syscalls::get_name(event.syscall_nr);
         if (name == "execve" || name == "execveat") && event.ret_val == 0 {
             let arg = &event.args[0];
             if arg.arg_type == ArgType::Path && arg.str_len > 0 {
                 if let Ok(path) = std::str::from_utf8(&arg.str_data[..arg.str_len as usize]) {
-                    if path.starts_with('/') {
-                        return Some(path.to_string());
+                    if path.starts_with('/') && seen.insert(path.to_string()) {
+                        paths.push(path.to_string());
                     }
                 }
             }
@@ -1191,18 +1215,20 @@ fn find_target_binary(capture: &ParsedCapture) -> Option<String> {
     }
 
     // Fall back: resolve the command name from metadata via which
-    if let Some(cmd) = capture.metadata.command.first() {
-        if let Ok(output) = std::process::Command::new("which").arg(cmd).output() {
-            if output.status.success() {
-                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !path.is_empty() {
-                    return Some(path);
+    if paths.is_empty() {
+        if let Some(cmd) = capture.metadata.command.first() {
+            if let Ok(output) = std::process::Command::new("which").arg(cmd).output() {
+                if output.status.success() {
+                    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if !path.is_empty() {
+                        paths.push(path);
+                    }
                 }
             }
         }
     }
 
-    None
+    paths
 }
 
 #[cfg(test)]
