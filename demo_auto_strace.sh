@@ -3,9 +3,12 @@ set -euxo pipefail
 
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 
+PATH_LEN=1500
+CAP_FILE=strace-capture.log
+
 CMD="$@"
-rm -f capture.scmm-cap && "${SCRIPT_DIR}"/target/release/scmm-record -v -f -o capture.scmm-cap -- ${CMD} 2>&1
-"${SCRIPT_DIR}"/target/release/scmm-extract -i capture.scmm-cap -o policy.yaml --missing-files skip --created-files parentdir --non-interactive
+rm -f "${CAP_FILE}" && strace -f -o "${CAP_FILE}" -s "${PATH_LEN}" -- ${CMD} 2>&1
+"${SCRIPT_DIR}"/target/release/scmm-extract -i "${CAP_FILE}" -o policy.yaml --missing-files skip --created-files parentdir --non-interactive
 "${SCRIPT_DIR}"/target/release/scmm-compile -i policy.yaml -o policy.scmm-pol
 
 # Use sudo for the enforcer if the policy requires capabilities

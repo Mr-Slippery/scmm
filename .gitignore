@@ -14,6 +14,5 @@ tests/out_*/
 
 # sandboxes
 ## nginx
-sandboxes/nginx/access.log
-sandboxes/nginx/error.log
-sandboxes/nginx/trace.log
+sandboxes/nginx/**/*.log
+sandboxes/nginx/**/*.pid
