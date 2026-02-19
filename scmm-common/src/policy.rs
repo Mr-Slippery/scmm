@@ -133,12 +133,12 @@ impl YamlPolicy {
         for rule in &mut self.filesystem.rules {
             rule.access.sort();
         }
-        self.network.outbound.sort_by(|a, b| {
+        self.network.tcp.outbound.sort_by(|a, b| {
             a.protocol
                 .cmp(&b.protocol)
                 .then_with(|| a.ports.cmp(&b.ports))
         });
-        self.network.inbound.sort_by(|a, b| {
+        self.network.tcp.inbound.sort_by(|a, b| {
             a.protocol
                 .cmp(&b.protocol)
                 .then_with(|| a.ports.cmp(&b.ports))
@@ -313,20 +313,25 @@ pub struct FilesystemRule {
 #[cfg(feature = "std")]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NetworkRules {
-    /// Allow loopback connections
-    #[serde(default = "default_true")]
+    /// Allow all loopback traffic (shortcut — when true, all loopback traffic
+    /// is permitted without needing individual port rules). Defaults to false.
+    #[serde(default)]
     pub allow_loopback: bool,
-    /// Outbound connection rules
+    /// TCP-specific rules (Landlock V4+ port enforcement)
     #[serde(default)]
-    pub outbound: Vec<NetworkRule>,
-    /// Inbound connection rules
-    #[serde(default)]
-    pub inbound: Vec<NetworkRule>,
+    pub tcp: TcpRules,
 }
 
+/// TCP connection rules (outbound connect and inbound bind)
 #[cfg(feature = "std")]
-fn default_true() -> bool {
-    true
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TcpRules {
+    /// Outbound TCP connection rules (connect)
+    #[serde(default)]
+    pub outbound: Vec<NetworkRule>,
+    /// Inbound TCP bind rules (bind)
+    #[serde(default)]
+    pub inbound: Vec<NetworkRule>,
 }
 
 /// A single network rule
@@ -402,4 +407,13 @@ pub mod landlock_access {
         }
         names
     }
+}
+
+/// Landlock network access rights (UAPI-stable values from kernel headers)
+#[cfg(feature = "std")]
+pub mod landlock_net_access {
+    /// LANDLOCK_ACCESS_NET_BIND_TCP
+    pub const BIND_TCP: u64 = 1;
+    /// LANDLOCK_ACCESS_NET_CONNECT_TCP
+    pub const CONNECT_TCP: u64 = 2;
 }

@@ -15,8 +15,22 @@ use scmm_common::{
         landlock_access, Action, FilesystemRule, FilesystemRules, NetworkRule, NetworkRules,
         OnMissing, PolicyMetadata, PolicySettings, RunAs, SyscallRule, YamlPolicy,
     },
-    ArgType, SyscallCategory,
+    ArgType, SyscallCategory, MAX_ARG_STR_LEN,
 };
+
+/// A network connection observed in the capture.
+struct NetworkConnection {
+    /// Socket address family (AF_INET=2, AF_INET6=10)
+    family: u32,
+    /// Port number
+    port: u16,
+    /// Address string (destination for connect, bind address for bind)
+    addr: String,
+    /// Protocol ("tcp" or "udp")
+    proto: String,
+    /// true = outbound (connect), false = inbound (bind)
+    outbound: bool,
+}
 
 use crate::parser::ParsedCapture;
 
@@ -197,6 +211,55 @@ pub fn run_non_interactive_extraction(
     }
     println!("Added {} filesystem rules", policy.filesystem.rules.len());
 
+    // Analyze network connections and binds.
+    // All observed TCP ports get Landlock rules — Landlock restricts port-level
+    // access regardless of address (loopback or not).
+    let connections = extract_network_connections(capture);
+    if connections.is_empty() {
+        println!("No network connections found in capture.");
+    } else {
+        // Collect unique TCP ports keyed by (port, family), split by direction.
+        let mut seen_out: std::collections::HashMap<(u16, u32), &str> =
+            std::collections::HashMap::new();
+        let mut seen_in: std::collections::HashMap<(u16, u32), &str> =
+            std::collections::HashMap::new();
+        for conn in &connections {
+            if conn.proto != "tcp" || conn.port == 0 {
+                continue;
+            }
+            let cidr = if conn.family == 10 {
+                "::/0"
+            } else {
+                "0.0.0.0/0"
+            };
+            if conn.outbound {
+                seen_out.insert((conn.port, conn.family), cidr);
+            } else {
+                seen_in.insert((conn.port, conn.family), cidr);
+            }
+        }
+        for ((port, _family), cidr) in seen_out {
+            policy.network.tcp.outbound.push(NetworkRule {
+                protocol: "tcp".to_string(),
+                addresses: vec![cidr.to_string()],
+                ports: vec![port],
+            });
+        }
+        for ((port, _family), cidr) in seen_in {
+            policy.network.tcp.inbound.push(NetworkRule {
+                protocol: "tcp".to_string(),
+                addresses: vec![cidr.to_string()],
+                ports: vec![port],
+            });
+        }
+        println!(
+            "Found {} network event(s): {} outbound rule(s), {} inbound (bind) rule(s).",
+            connections.len(),
+            policy.network.tcp.outbound.len(),
+            policy.network.tcp.inbound.len(),
+        );
+    }
+
     // Auto-detect capabilities
     let detected_caps = detect_file_capabilities(capture);
     if !detected_caps.is_empty() {
@@ -291,9 +354,10 @@ pub fn run_interactive_extraction(
     println!("{}", style("Analyzing network connections...").bold());
 
     let connections = extract_network_connections(capture);
-    if !connections.is_empty() {
-        process_network(&mut policy, &connections)?;
+    if connections.is_empty() {
         println!("No network connections found in capture.");
+    } else {
+        process_network(&mut policy, &connections)?;
     }
 
     // Detect capabilities from the target binary
@@ -1093,20 +1157,114 @@ fn process_file_paths(
     Ok(())
 }
 
-/// Extract network connections from capture
-fn extract_network_connections(_capture: &ParsedCapture) -> Vec<(String, u16, String)> {
-    // TODO: implement when sockaddr parsing is added to eBPF capture
-    Vec::new()
+/// Extract network connections and binds from capture.
+///
+/// Handles:
+/// - `connect` (nr=42): outbound connections (ret=0 or EINPROGRESS=-115)
+/// - `bind`    (nr=49): inbound binds (ret=0)
+///
+/// Skips AF_UNIX (family=1) — those are filesystem sockets.
+fn extract_network_connections(capture: &ParsedCapture) -> Vec<NetworkConnection> {
+    let mut connections = Vec::new();
+
+    // Build a map of (pid, fd) → (proto, family) from socket() calls.
+    // socket(family, type, protocol) — nr=41, arg0=family, arg1=type
+    // SOCK_STREAM=1 → TCP, SOCK_DGRAM=2 → UDP
+    let mut socket_type_map: HashMap<(u32, u64), (&str, u32)> = HashMap::new();
+    for event in &capture.events {
+        if event.syscall_nr == 41 && event.ret_val >= 0 {
+            let family = event.args[0].raw_value as u32;
+            // arg1 low bits: SOCK_STREAM=1, SOCK_DGRAM=2 (mask off SOCK_CLOEXEC etc.)
+            let sock_type = (event.args[1].raw_value & 0xf) as u32;
+            let proto = if sock_type == 2 { "udp" } else { "tcp" };
+            let fd = event.ret_val as u64;
+            socket_type_map.insert((event.pid, fd), (proto, family));
+        }
+    }
+
+    for event in &capture.events {
+        // connect(fd, sockaddr, addrlen) — nr=42  (outbound)
+        // bind(fd, sockaddr, addrlen)    — nr=49  (inbound)
+        let is_connect = event.syscall_nr == 42;
+        let is_bind = event.syscall_nr == 49;
+        if !is_connect && !is_bind {
+            continue;
+        }
+
+        // Accept any connect/bind attempt — the application issued the call,
+        // so the policy should allow it regardless of whether it succeeded.
+        // (Landlock will enforce port-level restrictions; here we just record
+        // which ports were attempted.)
+
+        // arg1 must be Sockaddr type (set by strace parser)
+        if event.args[1].arg_type != ArgType::Sockaddr {
+            continue;
+        }
+
+        let raw = event.args[1].raw_value;
+        let family = (raw >> 16) as u32;
+        let port = (raw & 0xffff) as u16;
+
+        // Skip AF_UNIX — those are filesystem sockets
+        if family == 1 || family == 0 {
+            continue;
+        }
+
+        let addr = {
+            let len = event.args[1].str_len as usize;
+            let len = len.min(MAX_ARG_STR_LEN);
+            String::from_utf8_lossy(&event.args[1].str_data[..len]).to_string()
+        };
+
+        // Look up the socket type from the socket() call
+        let fd = event.args[0].raw_value;
+        let proto = socket_type_map
+            .get(&(event.pid, fd))
+            .map(|(p, _)| *p)
+            .unwrap_or("tcp")
+            .to_string();
+
+        connections.push(NetworkConnection {
+            family,
+            port,
+            addr,
+            proto,
+            outbound: is_connect,
+        });
+    }
+
+    connections
 }
 
 /// Process network connections interactively
-fn process_network(policy: &mut YamlPolicy, connections: &[(String, u16, String)]) -> Result<()> {
+fn process_network(policy: &mut YamlPolicy, connections: &[NetworkConnection]) -> Result<()> {
     println!("Found {} unique network connections", connections.len());
 
-    // Group by port
+    // Group outbound connections by port (all addresses, including loopback —
+    // Landlock restricts by port regardless of address).
     let mut by_port: HashMap<u16, Vec<String>> = HashMap::new();
-    for (addr, port, _proto) in connections {
-        by_port.entry(*port).or_default().push(addr.clone());
+    for conn in connections {
+        if conn.outbound && conn.proto == "tcp" && conn.port != 0 {
+            by_port
+                .entry(conn.port)
+                .or_default()
+                .push(conn.addr.clone());
+        }
+    }
+
+    // Handle bind rules separately — always add them.
+    for conn in connections {
+        if !conn.outbound && conn.proto == "tcp" && conn.port != 0 {
+            policy.network.tcp.inbound.push(NetworkRule {
+                protocol: "tcp".to_string(),
+                addresses: vec!["0.0.0.0/0".to_string()],
+                ports: vec![conn.port],
+            });
+        }
+    }
+
+    if by_port.is_empty() {
+        return Ok(());
     }
 
     for (&port, addrs) in &by_port {
@@ -1139,14 +1297,14 @@ fn process_network(policy: &mut YamlPolicy, connections: &[(String, u16, String)
 
         match selection {
             0 => {
-                policy.network.outbound.push(NetworkRule {
+                policy.network.tcp.outbound.push(NetworkRule {
                     protocol: "tcp".to_string(),
                     addresses: vec!["0.0.0.0/0".to_string()],
                     ports: vec![port],
                 });
             }
             1 => {
-                policy.network.outbound.push(NetworkRule {
+                policy.network.tcp.outbound.push(NetworkRule {
                     protocol: "tcp".to_string(),
                     addresses: addrs.clone(),
                     ports: vec![port],

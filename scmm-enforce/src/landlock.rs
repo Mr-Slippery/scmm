@@ -5,9 +5,10 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use landlock::{
-    Access, AccessFs, BitFlags, CompatLevel, Compatible, PathBeneath, PathFd, Ruleset, RulesetAttr,
-    RulesetCreatedAttr, ABI,
+    Access, AccessFs, AccessNet, BitFlags, CompatLevel, Compatible, NetPort, PathBeneath, PathFd,
+    Ruleset, RulesetAttr, RulesetCreatedAttr, ABI,
 };
+use scmm_common::policy::landlock_net_access;
 use tracing::{debug, info, warn};
 
 use crate::loader::LoadedPolicy;
@@ -75,7 +76,9 @@ pub fn apply(policy: &LoadedPolicy, has_run_as: bool) -> Result<()> {
     let ruleset = Ruleset::default()
         .set_compatibility(CompatLevel::BestEffort)
         .handle_access(AccessFs::from_all(abi))
-        .context("Failed to create Landlock ruleset")?;
+        .context("Failed to handle filesystem access")?
+        .handle_access(AccessNet::from_all(ABI::V4))
+        .context("Failed to handle network access")?;
 
     let mut ruleset_created = ruleset
         .create()
@@ -182,40 +185,78 @@ pub fn apply(policy: &LoadedPolicy, has_run_as: bool) -> Result<()> {
     }
 
     // Phase 3: Apply the actual policy rules
+    let fs_count = policy
+        .landlock_rules
+        .iter()
+        .filter(|r| r.rule_type == 1)
+        .count();
+    let net_count = policy
+        .landlock_rules
+        .iter()
+        .filter(|r| r.rule_type == 2)
+        .count();
     info!(
-        "Applying {} Landlock filesystem rule(s):",
-        policy.landlock_rules.len()
+        "Applying {} Landlock rule(s) ({} filesystem, {} network):",
+        policy.landlock_rules.len(),
+        fs_count,
+        net_count,
     );
     for rule in policy.landlock_rules.iter() {
-        if rule.rule_type != 1 {
-            continue;
-        }
+        match rule.rule_type {
+            1 => {
+                let path = match policy.paths.get(rule.path_or_port as usize) {
+                    Some(p) => p,
+                    None => {
+                        warn!("  Path index {} out of bounds", rule.path_or_port);
+                        continue;
+                    }
+                };
 
-        let path = match policy.paths.get(rule.path_or_port as usize) {
-            Some(p) => p,
-            None => {
-                warn!("  Path index {} out of bounds", rule.path_or_port);
-                continue;
-            }
-        };
+                let access = bitmap_to_access_fs(rule.access);
+                let expanded = expand_path(path);
+                let access_str = format_access(access);
+                let on_missing = rule.on_missing;
 
-        let access = bitmap_to_access_fs(rule.access);
-        let expanded = expand_path(path);
-        let access_str = format_access(access);
-        let on_missing = rule.on_missing;
-
-        match add_path_rule(&mut ruleset_created, path, access, on_missing) {
-            Ok(true) => {
-                if expanded == *path {
-                    info!("  allow {} [{}]", path, access_str);
-                } else {
-                    info!("  allow {} -> {} [{}]", path, expanded, access_str);
+                match add_path_rule(&mut ruleset_created, path, access, on_missing) {
+                    Ok(true) => {
+                        if expanded == *path {
+                            info!("  allow {} [{}]", path, access_str);
+                        } else {
+                            info!("  allow {} -> {} [{}]", path, expanded, access_str);
+                        }
+                    }
+                    Ok(false) => {
+                        warn!("  skip  {} (path does not exist)", expanded);
+                    }
+                    Err(e) => warn!("  FAIL  {}: {}", path, e),
                 }
             }
-            Ok(false) => {
-                warn!("  skip  {} (path does not exist)", expanded);
+            2 => {
+                let port = rule.path_or_port as u16;
+                let mut net_access = BitFlags::<AccessNet>::empty();
+                if rule.access & landlock_net_access::BIND_TCP != 0 {
+                    net_access |= AccessNet::BindTcp;
+                }
+                if rule.access & landlock_net_access::CONNECT_TCP != 0 {
+                    net_access |= AccessNet::ConnectTcp;
+                }
+                if net_access.is_empty() {
+                    warn!(
+                        "  Port rule for port {} has no recognized access bits",
+                        port
+                    );
+                    continue;
+                }
+                match (&mut ruleset_created).add_rule(
+                    NetPort::new(port, net_access).set_compatibility(CompatLevel::BestEffort),
+                ) {
+                    Ok(_) => info!("  allow port {} [connect_tcp]", port),
+                    Err(e) => warn!("  FAIL port {}: {}", port, e),
+                }
             }
-            Err(e) => warn!("  FAIL  {}: {}", path, e),
+            _ => {
+                warn!("  Unknown rule_type {} — skipped", rule.rule_type);
+            }
         }
     }
 

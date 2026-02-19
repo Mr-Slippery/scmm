@@ -8,7 +8,8 @@ use scmm_common::{
     capture::arch,
     categories::x86_64 as syscalls,
     policy::{
-        policy_flags, Action, ArgConstraint, CompiledPolicyHeader, RunAs, YamlPolicy, RUN_AS_UNSET,
+        landlock_net_access, policy_flags, Action, ArgConstraint, CompiledPolicyHeader, RunAs,
+        YamlPolicy, RUN_AS_UNSET,
     },
 };
 
@@ -699,6 +700,30 @@ fn generate_landlock_rules(policy: &YamlPolicy) -> Result<Vec<u8>> {
 
         // On-missing strategy
         output.push(rule.on_missing as u8);
+    }
+
+    // Network port rules (rule_type = 2) — Landlock V4+ TCP port enforcement.
+    for rule in &policy.network.tcp.outbound {
+        if rule.protocol.to_lowercase() != "tcp" {
+            continue;
+        }
+        for &port in &rule.ports {
+            output.push(2u8); // rule_type = port
+            output.write_u64::<LittleEndian>(landlock_net_access::CONNECT_TCP)?;
+            output.write_u32::<LittleEndian>(port as u32)?;
+            output.push(2u8); // on_missing sentinel = skip (unused for port rules)
+        }
+    }
+    for rule in &policy.network.tcp.inbound {
+        if rule.protocol.to_lowercase() != "tcp" {
+            continue;
+        }
+        for &port in &rule.ports {
+            output.push(2u8); // rule_type = port
+            output.write_u64::<LittleEndian>(landlock_net_access::BIND_TCP)?;
+            output.write_u32::<LittleEndian>(port as u32)?;
+            output.push(2u8); // on_missing sentinel = skip (unused for port rules)
+        }
     }
 
     Ok(output)

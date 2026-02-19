@@ -18,6 +18,7 @@ Enforcement is tiered because seccomp-BPF cannot dereference pointers (TOCTOU pr
 |-------|------------|------------------|--------|
 | 1 | Seccomp-BPF | Syscall numbers and raw argument values | 3.5+ |
 | 2 | Landlock LSM | Path-based filesystem access | 5.13+ |
+| 2 | Landlock LSM | TCP port-level network access (bind/connect) | 6.7+ (ABI V4) |
 
 ## Quick Start
 
@@ -310,14 +311,16 @@ filesystem:
       # on_missing: skip (default, omitted)
 
 network:
-  allow_loopback: true
-  outbound:
-    - protocol: tcp
-      addresses: ["0.0.0.0/0"]
-      ports: [80, 443]
-  inbound:
-    - protocol: tcp
-      ports: [8080]
+  allow_loopback: false   # set to true to allow all loopback traffic without port rules
+  tcp:
+    outbound:
+      - protocol: tcp
+        addresses: ["0.0.0.0/0"]
+        ports: [80, 443]
+    inbound:
+      - protocol: tcp
+        addresses: ["0.0.0.0/0"]
+        ports: [8080]
 ```
 
 ### Filesystem access rights
@@ -339,6 +342,23 @@ network:
 | `remove_dir` | Delete a directory |
 | `truncate` | Truncate a file (Landlock ABI V3+) |
 | `refer` | Link/rename across directories |
+
+### Network rules (`network`)
+
+TCP port enforcement uses Landlock ABI V4 (kernel 6.7+). Rules are placed under `network.tcp` to leave room for future protocol types:
+
+| Field | Description |
+|-------|-------------|
+| `allow_loopback` | Shortcut: when `true`, all loopback traffic is allowed without individual port rules. Defaults to `false`. |
+| `tcp.outbound` | Ports the process is allowed to `connect()` to |
+| `tcp.inbound` | Ports the process is allowed to `bind()` to |
+
+Each rule entry has:
+- `protocol` — always `tcp` (UDP is not supported by Landlock)
+- `ports` — list of port numbers
+- `addresses` — informational only; Landlock enforces by port alone, not address
+
+Network rules are extracted automatically when using `strace` for capture (`-s 1500` recommended to capture full sockaddr strings). eBPF recording does not yet capture sockaddr arguments.
 
 ### Handling non-existent paths (`on_missing`)
 
@@ -370,11 +390,13 @@ The input format is auto-detected. Strace input supports:
 - Single-process and multi-process (`-f`) output
 - Unfinished/resumed syscall lines from concurrent threads
 - Open flag parsing (`O_RDONLY|O_CREAT|O_TRUNC` etc.) for correct Landlock access inference
+- TCP network extraction: `connect`/`bind` sockaddr arguments are parsed to populate `network.tcp` rules
 
 Limitations compared to eBPF recording:
 - Timestamps are synthetic (1ms increments), not real
 - No process tree or environment metadata in the capture
 - `strace` itself adds overhead via ptrace (eBPF is lower overhead)
+- **TCP network rules** are only extracted from strace captures — the eBPF recorder does not yet read `sockaddr` arguments from `connect`/`bind` syscalls (planned)
 
 ## Privilege Requirements
 

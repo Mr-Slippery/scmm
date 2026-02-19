@@ -238,6 +238,26 @@ fn build_event(
             let flags_val = parse_open_flags(arg_str);
             event.args[i].arg_type = ArgType::Flags;
             event.args[i].raw_value = flags_val;
+        } else if syscall_nr == 41 && i == 0 {
+            // socket(family, type, protocol) — parse AF_* family
+            if let Some(family) = parse_socket_family(arg_str) {
+                event.args[i].arg_type = ArgType::Integer;
+                event.args[i].raw_value = family as u64;
+            }
+        } else if (syscall_nr == 42 || syscall_nr == 49) && i == 1 {
+            // connect(fd, sockaddr_ptr, addrlen) nr=42
+            // bind(fd, sockaddr_ptr, addrlen)    nr=49
+            // Both have the sockaddr struct as arg1.
+            if let Some((family, port, addr)) = parse_sockaddr_connect(arg_str) {
+                event.args[i].arg_type = ArgType::Sockaddr;
+                // Pack family (high 16 bits) and port (low 16 bits) into raw_value
+                event.args[i].raw_value = ((family as u64) << 16) | (port as u64);
+                // Store address string in str_data
+                let bytes = addr.as_bytes();
+                let len = bytes.len().min(MAX_ARG_STR_LEN);
+                event.args[i].str_data[..len].copy_from_slice(&bytes[..len]);
+                event.args[i].str_len = len as u16;
+            }
         }
         // else: leave as Unknown (structs, arrays, etc.)
     }
@@ -414,6 +434,93 @@ fn parse_open_flags(s: &str) -> u64 {
     }
 
     flags
+}
+
+/// Parse a socket family string (e.g. "AF_INET") into its numeric value.
+fn parse_socket_family(s: &str) -> Option<u32> {
+    let s = s.trim();
+    match s {
+        "AF_UNSPEC" => Some(0),
+        "AF_UNIX" | "AF_LOCAL" => Some(1),
+        "AF_INET" => Some(2),
+        "AF_INET6" => Some(10),
+        "AF_NETLINK" => Some(16),
+        "AF_PACKET" => Some(17),
+        _ => s.parse::<u32>().ok(),
+    }
+}
+
+/// Parse a strace sockaddr struct argument like:
+///   `{sa_family=AF_INET, sin_port=htons(22), sin_addr=inet_addr("127.0.0.1")}`
+///   `{sa_family=AF_UNIX, sun_path="/var/run/foo"}`
+///
+/// Returns `(family, port, addr_string)`.
+fn parse_sockaddr_connect(s: &str) -> Option<(u32, u16, String)> {
+    let s = s.trim();
+    if !s.starts_with('{') {
+        return None;
+    }
+
+    // Extract sa_family value
+    let family_str = s
+        .split(',')
+        .find(|part| part.contains("sa_family="))
+        .and_then(|part| part.split('=').nth(1))
+        .map(|v| v.trim().trim_end_matches('}'))?;
+    let family = parse_socket_family(family_str)?;
+
+    match family {
+        2 => {
+            // AF_INET: sin_port=htons(N), sin_addr=inet_addr("A.B.C.D")
+            let port = s
+                .find("sin_port=htons(")
+                .and_then(|idx| {
+                    let rest = &s[idx + "sin_port=htons(".len()..];
+                    rest.find(')')
+                        .and_then(|end| rest[..end].parse::<u16>().ok())
+                })
+                .unwrap_or(0);
+            let addr = s
+                .find("sin_addr=inet_addr(\"")
+                .and_then(|idx| {
+                    let rest = &s[idx + "sin_addr=inet_addr(\"".len()..];
+                    rest.find('"').map(|end| rest[..end].to_string())
+                })
+                .unwrap_or_default();
+            Some((family, port, addr))
+        }
+        10 => {
+            // AF_INET6: sin6_port=htons(N), inet_pton(AF_INET6, "addr")
+            let port = s
+                .find("sin6_port=htons(")
+                .and_then(|idx| {
+                    let rest = &s[idx + "sin6_port=htons(".len()..];
+                    rest.find(')')
+                        .and_then(|end| rest[..end].parse::<u16>().ok())
+                })
+                .unwrap_or(0);
+            let addr = s
+                .find("inet_pton(AF_INET6, \"")
+                .and_then(|idx| {
+                    let rest = &s[idx + "inet_pton(AF_INET6, \"".len()..];
+                    rest.find('"').map(|end| rest[..end].to_string())
+                })
+                .unwrap_or_default();
+            Some((family, port, addr))
+        }
+        1 => {
+            // AF_UNIX: sun_path="/path"
+            let path = s
+                .find("sun_path=\"")
+                .and_then(|idx| {
+                    let rest = &s[idx + "sun_path=\"".len()..];
+                    rest.find('"').map(|end| rest[..end].to_string())
+                })
+                .unwrap_or_default();
+            Some((family, 0, path))
+        }
+        _ => Some((family, 0, String::new())),
+    }
 }
 
 /// Returns which argument index contains the path for a given syscall (x86_64).

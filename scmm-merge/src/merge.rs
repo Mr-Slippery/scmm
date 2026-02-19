@@ -7,7 +7,7 @@ use tracing::warn;
 
 use scmm_common::policy::{
     Action, FilesystemRule, FilesystemRules, NetworkRule, NetworkRules, OnMissing,
-    PolicyMetadata, PolicySettings, SyscallRule, YamlPolicy,
+    PolicyMetadata, PolicySettings, SyscallRule, TcpRules, YamlPolicy,
 };
 
 /// Merge multiple policies into a single unified policy (union semantics).
@@ -209,16 +209,15 @@ fn merge_network(policies: &[YamlPolicy]) -> NetworkRules {
     let allow_loopback = policies.iter().any(|p| p.network.allow_loopback);
 
     let outbound = merge_network_rules(
-        policies.iter().flat_map(|p| &p.network.outbound),
+        policies.iter().flat_map(|p| &p.network.tcp.outbound),
     );
     let inbound = merge_network_rules(
-        policies.iter().flat_map(|p| &p.network.inbound),
+        policies.iter().flat_map(|p| &p.network.tcp.inbound),
     );
 
     NetworkRules {
         allow_loopback,
-        outbound,
-        inbound,
+        tcp: TcpRules { outbound, inbound },
     }
 }
 

@@ -182,7 +182,7 @@ pub fn validate(policy: &YamlPolicy, arch: &str) -> Result<Vec<String>> {
     }
 
     // Check network rules
-    for rule in &policy.network.outbound {
+    for rule in &policy.network.tcp.outbound {
         if rule.ports.is_empty() && rule.addresses.is_empty() {
             warnings.push("Network rule with no ports or addresses".to_string());
         }
