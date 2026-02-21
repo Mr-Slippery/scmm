@@ -159,12 +159,15 @@ impl CaptureWriter {
         }
 
         // Argument string data (variable length)
+        // Serialized for Path, String, and Sockaddr args (all carry str_data).
         let mut arg_info_count: u8 = 0;
         for arg in &event.args {
             if arg.str_len > 0
                 && matches!(
                     arg.arg_type,
-                    scmm_common::ArgType::Path | scmm_common::ArgType::String
+                    scmm_common::ArgType::Path
+                        | scmm_common::ArgType::String
+                        | scmm_common::ArgType::Sockaddr
                 )
             {
                 arg_info_count += 1;
@@ -176,7 +179,9 @@ impl CaptureWriter {
             if arg.str_len > 0
                 && matches!(
                     arg.arg_type,
-                    scmm_common::ArgType::Path | scmm_common::ArgType::String
+                    scmm_common::ArgType::Path
+                        | scmm_common::ArgType::String
+                        | scmm_common::ArgType::Sockaddr
                 )
             {
                 self.event_buffer.write_u8(i as u8)?;

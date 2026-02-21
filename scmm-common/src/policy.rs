@@ -146,8 +146,10 @@ impl YamlPolicy {
 fn merge_network_rules(rules: Vec<NetworkRule>) -> Vec<NetworkRule> {
     use std::collections::BTreeMap;
 
-    // Key: (protocol, sorted addresses) → accumulated ports
-    let mut map: BTreeMap<(String, Vec<String>), Vec<u16>> = BTreeMap::new();
+    // Key: (protocol, sorted addresses) → (accumulated ports, accumulated observed_addresses)
+    type ProtoAddresses = (String, Vec<String>);
+    type PortsAddresses = (Vec<u16>, Vec<String>);
+    let mut map: BTreeMap<ProtoAddresses, PortsAddresses> = BTreeMap::new();
 
     for mut rule in rules {
         rule.addresses.sort();
@@ -155,23 +157,31 @@ fn merge_network_rules(rules: Vec<NetworkRule>) -> Vec<NetworkRule> {
         let key = (rule.protocol, rule.addresses);
         let entry = map.entry(key).or_default();
         for port in rule.ports {
-            if !entry.contains(&port) {
-                entry.push(port);
+            if !entry.0.contains(&port) {
+                entry.0.push(port);
+            }
+        }
+        for addr in rule.observed_addresses {
+            if !entry.1.contains(&addr) {
+                entry.1.push(addr);
             }
         }
     }
 
     let mut merged: Vec<NetworkRule> = map
         .into_iter()
-        .map(|((protocol, mut addresses), mut ports)| {
-            addresses.sort();
-            ports.sort();
-            NetworkRule {
-                protocol,
-                addresses,
-                ports,
-            }
-        })
+        .map(
+            |((protocol, addresses), (mut ports, mut observed_addresses))| {
+                ports.sort();
+                observed_addresses.sort();
+                NetworkRule {
+                    protocol,
+                    addresses,
+                    ports,
+                    observed_addresses,
+                }
+            },
+        )
         .collect();
 
     // Sort rules: by ports list for deterministic output
@@ -378,12 +388,19 @@ pub struct TcpRules {
 pub struct NetworkRule {
     /// Protocol (tcp, udp)
     pub protocol: String,
-    /// Allowed addresses (CIDR notation or "any")
+    /// Allowed addresses (CIDR notation or "any").
+    /// For Landlock enforcement this is always a wildcard (e.g. 0.0.0.0/0)
+    /// because Landlock can only restrict by port, not by destination IP.
     #[serde(default)]
     pub addresses: Vec<String>,
     /// Allowed ports
     #[serde(default)]
     pub ports: Vec<u16>,
+    /// Actual destination addresses observed during recording (informational only).
+    /// Landlock cannot enforce IP-level restrictions, so these are recorded here
+    /// for documentation purposes while `addresses` holds the enforceable wildcard.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub observed_addresses: Vec<String>,
 }
 
 /// Landlock access rights (for filesystem rules)

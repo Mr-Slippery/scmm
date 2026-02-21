@@ -219,9 +219,10 @@ pub fn run_non_interactive_extraction(
         println!("No network connections found in capture.");
     } else {
         // Collect unique TCP ports keyed by (port, family), split by direction.
-        let mut seen_out: std::collections::HashMap<(u16, u32), &str> =
+        // Also accumulate observed destination addresses per port for documentation.
+        let mut seen_out: std::collections::HashMap<(u16, u32), (&str, Vec<String>)> =
             std::collections::HashMap::new();
-        let mut seen_in: std::collections::HashMap<(u16, u32), &str> =
+        let mut seen_in: std::collections::HashMap<(u16, u32), (&str, Vec<String>)> =
             std::collections::HashMap::new();
         for conn in &connections {
             if conn.proto != "tcp" || conn.port == 0 {
@@ -232,24 +233,32 @@ pub fn run_non_interactive_extraction(
             } else {
                 "0.0.0.0/0"
             };
-            if conn.outbound {
-                seen_out.insert((conn.port, conn.family), cidr);
+            let map = if conn.outbound {
+                &mut seen_out
             } else {
-                seen_in.insert((conn.port, conn.family), cidr);
+                &mut seen_in
+            };
+            let entry = map
+                .entry((conn.port, conn.family))
+                .or_insert_with(|| (cidr, Vec::new()));
+            if !conn.addr.is_empty() && !entry.1.contains(&conn.addr) {
+                entry.1.push(conn.addr.clone());
             }
         }
-        for ((port, _family), cidr) in seen_out {
+        for ((port, _family), (cidr, observed)) in seen_out {
             policy.network.tcp.outbound.push(NetworkRule {
                 protocol: "tcp".to_string(),
                 addresses: vec![cidr.to_string()],
                 ports: vec![port],
+                observed_addresses: observed,
             });
         }
-        for ((port, _family), cidr) in seen_in {
+        for ((port, _family), (cidr, observed)) in seen_in {
             policy.network.tcp.inbound.push(NetworkRule {
                 protocol: "tcp".to_string(),
                 addresses: vec![cidr.to_string()],
                 ports: vec![port],
+                observed_addresses: observed,
             });
         }
         println!(
@@ -1255,10 +1264,16 @@ fn process_network(policy: &mut YamlPolicy, connections: &[NetworkConnection]) -
     // Handle bind rules separately — always add them.
     for conn in connections {
         if !conn.outbound && conn.proto == "tcp" && conn.port != 0 {
+            let observed = if conn.addr.is_empty() {
+                Vec::new()
+            } else {
+                vec![conn.addr.clone()]
+            };
             policy.network.tcp.inbound.push(NetworkRule {
                 protocol: "tcp".to_string(),
                 addresses: vec!["0.0.0.0/0".to_string()],
                 ports: vec![conn.port],
+                observed_addresses: observed,
             });
         }
     }
@@ -1301,13 +1316,17 @@ fn process_network(policy: &mut YamlPolicy, connections: &[NetworkConnection]) -
                     protocol: "tcp".to_string(),
                     addresses: vec!["0.0.0.0/0".to_string()],
                     ports: vec![port],
+                    observed_addresses: addrs.clone(),
                 });
             }
             1 => {
+                // User chose specific addresses — store them as both the enforced
+                // addresses and the observed addresses (no wildcard needed).
                 policy.network.tcp.outbound.push(NetworkRule {
                     protocol: "tcp".to_string(),
                     addresses: addrs.clone(),
                     ports: vec![port],
+                    observed_addresses: Vec::new(),
                 });
             }
             _ => {} // Skip

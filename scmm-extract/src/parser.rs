@@ -167,6 +167,7 @@ fn parse_event(
                 event.args[arg_index].arg_type = match arg_type_byte {
                     3 => scmm_common::ArgType::String,
                     4 => scmm_common::ArgType::Path,
+                    8 => scmm_common::ArgType::Sockaddr,
                     _ => scmm_common::ArgType::Unknown,
                 };
                 event.args[arg_index].str_len = str_len as u16;
