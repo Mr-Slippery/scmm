@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# local_only
 # Test: record nc server (bind) and nc client (connect) with strace,
 #       extract policies, compile, enforce both sides, verify communication.
 #       Also verifies that Landlock blocks connecting to a disallowed port.
