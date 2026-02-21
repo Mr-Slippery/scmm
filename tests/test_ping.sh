@@ -16,19 +16,28 @@ mkdir -p "$WORKDIR"
 CMD="ping -c 1 127.0.0.1"
 
 echo "=== test_ping: $CMD ==="
+uname -r
 
 # 1. Record (needs CAP_BPF etc)
-"$ROOT/target/release/scmm-record" -f -o "$WORKDIR/capture.scmm-cap" -- $CMD >/dev/null 2>&1
+"$ROOT/target/release/scmm-record" -f -o "$WORKDIR/capture.scmm-cap" -- $CMD 2>"$WORKDIR/record.log"
 
 # 2. Extract (non-interactive)
 "$ROOT/target/release/scmm-extract" --non-interactive --missing-files skip \
-    -i "$WORKDIR/capture.scmm-cap" -o "$WORKDIR/policy.yaml" >/dev/null 2>&1
+    -i "$WORKDIR/capture.scmm-cap" -o "$WORKDIR/policy.yaml" 2>"$WORKDIR/extract.log"
+
+cat "$WORKDIR/policy.yaml"
 
 # 3. Compile
-"$ROOT/target/release/scmm-compile" -i "$WORKDIR/policy.yaml" -o "$WORKDIR/policy.pol" 2>/dev/null
+"$ROOT/target/release/scmm-compile" -i "$WORKDIR/policy.yaml" -o "$WORKDIR/policy.pol" 2>"$WORKDIR/compile.log"
 
 # 4. Enforce (needs sudo for run_as + capabilities)
-output=$(sudo "$ROOT/target/release/scmm-enforce" -p "$WORKDIR/policy.pol" -- $CMD 2>/dev/null)
+enforce_log="$WORKDIR/enforce.log"
+output=$(sudo "$ROOT/target/release/scmm-enforce" -vv -p "$WORKDIR/policy.pol" -- $CMD 2>"$enforce_log") || {
+    echo "FAIL: test_ping — enforce exited with error"
+    cat "$enforce_log"
+    exit 1
+}
+cat "$enforce_log"
 
 # 5. Verify — ping should succeed (check for "1 received" or "bytes from")
 if echo "$output" | grep -q "1 received\|bytes from"; then
@@ -36,6 +45,5 @@ if echo "$output" | grep -q "1 received\|bytes from"; then
 else
     echo "FAIL: test_ping — ping did not succeed under enforcement"
     echo "Output: $output"
-    echo "Policy: $WORKDIR/policy.yaml"
     exit 1
 fi

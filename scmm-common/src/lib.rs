@@ -66,6 +66,7 @@ pub fn init_tracing_with_base(verbose: u8, base: tracing::Level) {
     let subscriber = FmtSubscriber::builder()
         .with_max_level(level)
         .with_target(false)
+        .with_writer(std::io::stderr)
         .finish();
 
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");

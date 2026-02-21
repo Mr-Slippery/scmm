@@ -15,6 +15,7 @@ TESTFILE="$WORKDIR/testfile"
 MISSINGFILE="$WORKDIR/does_not_exist"
 
 echo "=== test_exclude_failed ==="
+uname -r
 
 # ── Part 1: touch (create-intent path should survive filtering) ──
 
@@ -24,16 +25,16 @@ CMD_TOUCH="touch $TESTFILE"
 export PATH="/nonexistent/bin:$PATH"
 
 # Record touch
-"$ROOT/target/release/scmm-record" -f -o "$WORKDIR/cap_touch.scmm-cap" -- $CMD_TOUCH >/dev/null 2>&1
+"$ROOT/target/release/scmm-record" -f -o "$WORKDIR/cap_touch.scmm-cap" -- $CMD_TOUCH 2>"$WORKDIR/record.log"
 
 # Extract with --missing-files precreate (includes all-failed paths)
 "$ROOT/target/release/scmm-extract" --non-interactive --missing-files precreate \
-    -i "$WORKDIR/cap_touch.scmm-cap" -o "$WORKDIR/policy_all.yaml" >/dev/null 2>&1
+    -i "$WORKDIR/cap_touch.scmm-cap" -o "$WORKDIR/policy_all.yaml" 2>"$WORKDIR/extract_all.log"
 
 # Extract with default --missing-files (skip: excludes all-failed read-only paths)
 # and --created-files parentdir so the enforcement test is meaningful
 "$ROOT/target/release/scmm-extract" --non-interactive --created-files parentdir \
-    -i "$WORKDIR/cap_touch.scmm-cap" -o "$WORKDIR/policy_filtered.yaml" >/dev/null 2>&1
+    -i "$WORKDIR/cap_touch.scmm-cap" -o "$WORKDIR/policy_filtered.yaml" 2>"$WORKDIR/extract_filtered.log"
 
 # Filtered policy should have fewer rules (PATH lookups removed)
 count_rules() {
@@ -55,15 +56,18 @@ if ! grep -q "$TESTFILE" "$WORKDIR/policy_filtered.yaml"; then
 fi
 
 # Compile and enforce the filtered policy
+cat "$WORKDIR/policy_filtered.yaml"
 "$ROOT/target/release/scmm-compile" -i "$WORKDIR/policy_filtered.yaml" \
-    -o "$WORKDIR/policy_filtered.pol" >/dev/null 2>&1
+    -o "$WORKDIR/policy_filtered.pol" 2>"$WORKDIR/compile.log"
 
 rm -f "$TESTFILE"
 
-if ! "$ROOT/target/release/scmm-enforce" -p "$WORKDIR/policy_filtered.pol" -- $CMD_TOUCH 2>/dev/null; then
+if ! "$ROOT/target/release/scmm-enforce" -vv -p "$WORKDIR/policy_filtered.pol" -- $CMD_TOUCH 2>"$WORKDIR/enforce.log"; then
     echo "FAIL: touch — enforce with filtered policy failed"
+    cat "$WORKDIR/enforce.log"
     exit 1
 fi
+cat "$WORKDIR/enforce.log"
 
 if [ ! -f "$TESTFILE" ]; then
     echo "FAIL: touch — file was not created under filtered policy"
@@ -75,11 +79,11 @@ fi
 # cat will fail but we still record the attempt
 CMD_CAT="cat $MISSINGFILE"
 
-"$ROOT/target/release/scmm-record" -f -o "$WORKDIR/cap_cat.scmm-cap" -- $CMD_CAT >/dev/null 2>&1 || true
+"$ROOT/target/release/scmm-record" -f -o "$WORKDIR/cap_cat.scmm-cap" -- $CMD_CAT 2>"$WORKDIR/record_cat.log" || true
 
 # Extract with default --missing-files (skip: excludes all-failed read-only paths)
 "$ROOT/target/release/scmm-extract" --non-interactive \
-    -i "$WORKDIR/cap_cat.scmm-cap" -o "$WORKDIR/policy_cat_filtered.yaml" >/dev/null 2>&1
+    -i "$WORKDIR/cap_cat.scmm-cap" -o "$WORKDIR/policy_cat_filtered.yaml" 2>"$WORKDIR/extract_cat.log"
 
 # The nonexistent file must NOT appear as a filesystem rule in the filtered policy
 # (pure failed read, no create intent). Match on "- path:" to avoid hitting metadata.
@@ -90,7 +94,7 @@ fi
 
 # With --missing-files precreate it SHOULD appear as a filesystem rule
 "$ROOT/target/release/scmm-extract" --non-interactive --missing-files precreate \
-    -i "$WORKDIR/cap_cat.scmm-cap" -o "$WORKDIR/policy_cat_all.yaml" >/dev/null 2>&1
+    -i "$WORKDIR/cap_cat.scmm-cap" -o "$WORKDIR/policy_cat_all.yaml" 2>"$WORKDIR/extract_cat_all.log"
 
 if ! grep -q "path: $MISSINGFILE" "$WORKDIR/policy_cat_all.yaml"; then
     echo "FAIL: cat — precreate policy should contain rule for $MISSINGFILE"

@@ -10,6 +10,7 @@ rm -rf "$WORKDIR"
 mkdir -p "$WORKDIR"
 
 echo "=== test_attach: record via --pid ==="
+uname -r
 
 # 1. Start a background process that does some syscalls
 #    The loop writes to a file so we can verify it ran, and gives us time to attach.
@@ -26,7 +27,7 @@ TARGET_PID=$!
 sleep 0.05
 
 # 2. Record by attaching to the PID (record for ~1.5s, the target runs for ~2s)
-"$ROOT/target/release/scmm-record" -f -p "$TARGET_PID" -o "$WORKDIR/capture.scmm-cap" >/dev/null 2>&1 &
+"$ROOT/target/release/scmm-record" -f -p "$TARGET_PID" -o "$WORKDIR/capture.scmm-cap" 2>"$WORKDIR/record.log" &
 RECORDER_PID=$!
 
 # Wait for the target to finish — recorder should detect exit and stop
@@ -47,6 +48,8 @@ done
 wait "$RECORDER_PID" 2>/dev/null || true
 
 # 3. Verify capture file exists and has content
+cat "$WORKDIR/record.log"
+
 if [ ! -f "$WORKDIR/capture.scmm-cap" ]; then
     echo "FAIL: test_attach — capture file not created"
     exit 1
@@ -60,7 +63,7 @@ fi
 
 # 4. Extract policy (non-interactive)
 "$ROOT/target/release/scmm-extract" --non-interactive --missing-files skip \
-    -i "$WORKDIR/capture.scmm-cap" -o "$WORKDIR/policy.yaml" >/dev/null 2>&1
+    -i "$WORKDIR/capture.scmm-cap" -o "$WORKDIR/policy.yaml" 2>"$WORKDIR/extract.log"
 
 if [ ! -f "$WORKDIR/policy.yaml" ]; then
     echo "FAIL: test_attach — policy extraction failed"
