@@ -1,12 +1,15 @@
 //! Syscall recording eBPF handlers
 
 use aya_ebpf::{
-    helpers::{bpf_get_current_pid_tgid, bpf_ktime_get_ns, bpf_probe_read_user_str_bytes},
+    helpers::{
+        bpf_get_current_pid_tgid, bpf_ktime_get_ns, bpf_probe_read_user_buf,
+        bpf_probe_read_user_str_bytes,
+    },
     macros::map,
     maps::{Array, HashMap, RingBuf},
     programs::TracePointContext,
 };
-use scmm_common::{RingBufEvent, ring_event_type, MAX_ARGS};
+use scmm_common::{ring_event_type, RingBufEvent, MAX_ARGS, MAX_SOCKADDR_LEN};
 
 /// Ring buffer for sending events to userspace (1 MB to accommodate larger events with path data)
 #[map]
@@ -65,6 +68,20 @@ fn path_arg_index(syscall_nr: u32) -> u8 {
     }
 }
 
+/// Returns the argument index (0-5) that contains a sockaddr pointer for this syscall,
+/// or 255 if no sockaddr argument. x86_64 syscall numbers.
+///
+/// connect(fd, sockaddr, addrlen) — nr=42, sockaddr at arg1
+/// bind(fd, sockaddr, addrlen)    — nr=49, sockaddr at arg1
+#[inline(always)]
+fn sockaddr_arg_index(syscall_nr: u32) -> u8 {
+    match syscall_nr {
+        42 => 1, // connect
+        49 => 1, // bind
+        _ => 255,
+    }
+}
+
 /// Handle sys_enter tracepoint
 pub fn handle_sys_enter(ctx: TracePointContext) -> Result<(), i64> {
     let pid_tgid = bpf_get_current_pid_tgid();
@@ -87,6 +104,7 @@ pub fn handle_sys_enter(ctx: TracePointContext) -> Result<(), i64> {
 
     let nr = syscall_nr as u32;
     let pai = path_arg_index(nr);
+    let sai = sockaddr_arg_index(nr);
 
     // Write directly into ring buffer reserved slot (struct is too large for eBPF stack)
     if let Some(mut entry) = EVENTS.reserve::<RingBufEvent>(0) {
@@ -101,7 +119,7 @@ pub fn handle_sys_enter(ctx: TracePointContext) -> Result<(), i64> {
             (*ptr).ret_val = 0;
             (*ptr).args = args;
             (*ptr).path_arg_index = pai;
-            (*ptr)._pad2 = 0;
+            (*ptr).sockaddr_arg_index = sai;
             (*ptr).path_str_len = 0;
 
             // Read path string from userspace if this syscall has a path argument
@@ -116,6 +134,16 @@ pub fn handle_sys_enter(ctx: TracePointContext) -> Result<(), i64> {
                             // Read failed, leave path_str_len = 0
                         }
                     }
+                }
+            }
+
+            // Read sockaddr bytes from userspace (binary struct, not string)
+            if sai != 255 && (sai as usize) < MAX_ARGS {
+                let user_ptr = args[sai as usize] as *const u8;
+                if !user_ptr.is_null() {
+                    // Read up to MAX_SOCKADDR_LEN bytes; ignore errors (partial reads are ok)
+                    let dest: &mut [u8; MAX_SOCKADDR_LEN] = &mut (*ptr).sockaddr_data;
+                    let _ = bpf_probe_read_user_buf(user_ptr, dest);
                 }
             }
         }
@@ -172,7 +200,7 @@ pub fn handle_sys_exit(ctx: TracePointContext) -> Result<(), i64> {
             (*ptr).ret_val = ret_val;
             (*ptr).args = [0u64; MAX_ARGS];
             (*ptr).path_arg_index = 255;
-            (*ptr)._pad2 = 0;
+            (*ptr).sockaddr_arg_index = 255;
             (*ptr).path_str_len = 0;
         }
         entry.submit(0);

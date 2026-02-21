@@ -149,6 +149,9 @@ pub mod event_flags {
     pub const READ_ERROR: u32 = 1 << 3;
 }
 
+/// Maximum size of a captured sockaddr struct (fits sockaddr_in6 = 28 bytes)
+pub const MAX_SOCKADDR_LEN: usize = 32;
+
 /// Lightweight event for ring buffer (minimal size for eBPF)
 /// This is what gets sent from kernel to userspace
 #[repr(C)]
@@ -172,12 +175,14 @@ pub struct RingBufEvent {
     pub args: [u64; MAX_ARGS],
     /// Which argument index contains a captured path string (255 = none)
     pub path_arg_index: u8,
-    /// Padding for alignment
-    pub _pad2: u8,
+    /// Which argument index contains a captured sockaddr struct (255 = none)
+    pub sockaddr_arg_index: u8,
     /// Length of the captured path string (0 = no string)
     pub path_str_len: u16,
     /// Path string data (only valid up to path_str_len bytes)
     pub path_data: [u8; MAX_PATH_LEN],
+    /// Raw sockaddr bytes (only valid when sockaddr_arg_index != 255)
+    pub sockaddr_data: [u8; MAX_SOCKADDR_LEN],
 }
 
 impl Default for RingBufEvent {
@@ -192,9 +197,10 @@ impl Default for RingBufEvent {
             ret_val: 0,
             args: [0u64; MAX_ARGS],
             path_arg_index: 255,
-            _pad2: 0,
+            sockaddr_arg_index: 255,
             path_str_len: 0,
             path_data: [0u8; MAX_PATH_LEN],
+            sockaddr_data: [0u8; MAX_SOCKADDR_LEN],
         }
     }
 }
@@ -210,6 +216,7 @@ impl core::fmt::Debug for RingBufEvent {
             .field("ret_val", &self.ret_val)
             .field("args", &self.args)
             .field("path_arg_index", &self.path_arg_index)
+            .field("sockaddr_arg_index", &self.sockaddr_arg_index)
             .field("path_str_len", &self.path_str_len)
             .finish()
     }

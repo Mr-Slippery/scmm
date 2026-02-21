@@ -17,7 +17,7 @@ use tracing::{debug, info, trace, warn};
 
 use scmm_common::{
     capture::arch, categories::x86_64 as syscalls, ring_event_type, CategoryFilter, RingBufEvent,
-    SyscallEvent,
+    SyscallEvent, MAX_ARG_STR_LEN,
 };
 
 use crate::capture::CaptureWriter;
@@ -99,6 +99,58 @@ fn read_proc_uid_gid(pid: u32) -> Option<(u32, u32)> {
         }
     }
     Some((uid?, gid?))
+}
+
+/// Parse raw sockaddr bytes captured by eBPF into (family, port, address_string).
+///
+/// Supports:
+/// - AF_INET  (family=2):  IPv4 — sin_port (BE u16), sin_addr (4 bytes)
+/// - AF_INET6 (family=10): IPv6 — sin6_port (BE u16), sin6_addr (16 bytes after flowinfo)
+/// - AF_UNIX  (family=1):  Unix domain — sun_path (null-terminated string)
+///
+/// Returns None if the data is too short or the family is unrecognised.
+fn parse_sockaddr_bytes(data: &[u8]) -> Option<(u32, u16, String)> {
+    if data.len() < 2 {
+        return None;
+    }
+    // sa_family is the first 2 bytes, little-endian on x86_64
+    let family = u16::from_le_bytes([data[0], data[1]]) as u32;
+    match family {
+        // AF_INET = 2: struct sockaddr_in { u16 family; u16 port(BE); u32 addr; ... }
+        2 => {
+            if data.len() < 8 {
+                return None;
+            }
+            let port = u16::from_be_bytes([data[2], data[3]]);
+            let addr = std::net::Ipv4Addr::new(data[4], data[5], data[6], data[7]);
+            Some((family, port, addr.to_string()))
+        }
+        // AF_INET6 = 10: struct sockaddr_in6 { u16 family; u16 port(BE); u32 flowinfo; u8 addr[16]; ... }
+        10 => {
+            if data.len() < 24 {
+                return None;
+            }
+            let port = u16::from_be_bytes([data[2], data[3]]);
+            // flowinfo is data[4..8], skip it
+            let addr_bytes: [u8; 16] = data[8..24].try_into().ok()?;
+            let addr = std::net::Ipv6Addr::from(addr_bytes);
+            Some((family, port, addr.to_string()))
+        }
+        // AF_UNIX = 1: struct sockaddr_un { u16 family; char sun_path[108]; }
+        1 => {
+            if data.len() < 3 {
+                return None;
+            }
+            let path_bytes = &data[2..];
+            let end = path_bytes
+                .iter()
+                .position(|&b| b == 0)
+                .unwrap_or(path_bytes.len());
+            let path = String::from_utf8_lossy(&path_bytes[..end]).to_string();
+            Some((family, 0, path))
+        }
+        _ => None,
+    }
 }
 
 /// Recorder manages eBPF programs and event collection
@@ -551,6 +603,23 @@ impl Recorder {
                     event.args[idx].arg_type = scmm_common::ArgType::Path;
                     event.args[idx].str_data[..len].copy_from_slice(&entry.path_data[..len]);
                     event.args[idx].str_len = len as u16;
+                }
+            }
+
+            // Parse captured sockaddr bytes into ArgType::Sockaddr
+            // Format mirrors the strace parser: raw_value = (family << 16) | port,
+            // str_data = address string (IP or path), str_len = length.
+            if entry.sockaddr_arg_index != 255 {
+                let idx = entry.sockaddr_arg_index as usize;
+                if idx < scmm_common::MAX_ARGS {
+                    if let Some((family, port, addr)) = parse_sockaddr_bytes(&entry.sockaddr_data) {
+                        event.args[idx].arg_type = scmm_common::ArgType::Sockaddr;
+                        event.args[idx].raw_value = ((family as u64) << 16) | (port as u64);
+                        let bytes = addr.as_bytes();
+                        let len = bytes.len().min(MAX_ARG_STR_LEN);
+                        event.args[idx].str_data[..len].copy_from_slice(&bytes[..len]);
+                        event.args[idx].str_len = len as u16;
+                    }
                 }
             }
         }
