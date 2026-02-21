@@ -133,17 +133,55 @@ impl YamlPolicy {
         for rule in &mut self.filesystem.rules {
             rule.access.sort();
         }
-        self.network.tcp.outbound.sort_by(|a, b| {
-            a.protocol
-                .cmp(&b.protocol)
-                .then_with(|| a.ports.cmp(&b.ports))
-        });
-        self.network.tcp.inbound.sort_by(|a, b| {
-            a.protocol
-                .cmp(&b.protocol)
-                .then_with(|| a.ports.cmp(&b.ports))
-        });
+        self.network.tcp.outbound =
+            merge_network_rules(std::mem::take(&mut self.network.tcp.outbound));
+        self.network.tcp.inbound =
+            merge_network_rules(std::mem::take(&mut self.network.tcp.inbound));
     }
+}
+
+/// Merge network rules that share the same protocol and address set into a single
+/// rule with all their ports combined, then sort the result for deterministic output.
+#[cfg(feature = "std")]
+fn merge_network_rules(rules: Vec<NetworkRule>) -> Vec<NetworkRule> {
+    use std::collections::BTreeMap;
+
+    // Key: (protocol, sorted addresses) → accumulated ports
+    let mut map: BTreeMap<(String, Vec<String>), Vec<u16>> = BTreeMap::new();
+
+    for mut rule in rules {
+        rule.addresses.sort();
+        rule.ports.sort();
+        let key = (rule.protocol, rule.addresses);
+        let entry = map.entry(key).or_default();
+        for port in rule.ports {
+            if !entry.contains(&port) {
+                entry.push(port);
+            }
+        }
+    }
+
+    let mut merged: Vec<NetworkRule> = map
+        .into_iter()
+        .map(|((protocol, mut addresses), mut ports)| {
+            addresses.sort();
+            ports.sort();
+            NetworkRule {
+                protocol,
+                addresses,
+                ports,
+            }
+        })
+        .collect();
+
+    // Sort rules: by ports list for deterministic output
+    merged.sort_by(|a, b| {
+        a.protocol
+            .cmp(&b.protocol)
+            .then_with(|| a.ports.cmp(&b.ports))
+    });
+
+    merged
 }
 
 /// Policy metadata
