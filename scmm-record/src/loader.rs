@@ -22,6 +22,46 @@ use scmm_common::{
 
 use crate::capture::CaptureWriter;
 
+/// Try to read a NUL-terminated path string from a traced process's memory
+/// via /proc/<pid>/mem, falling back when the eBPF bpf_probe_read_user_str_bytes
+/// call failed because the page was not yet faulted in (lazy-loaded .rodata pages).
+///
+/// Returns true if the path was successfully read and stored in `event.path_data`.
+fn try_read_path_from_proc_mem(event: &mut RingBufEvent) -> bool {
+    // Only attempt if we have a path arg index but no path data
+    if event.path_arg_index == 255 || event.path_str_len > 0 {
+        return false;
+    }
+    let ptr = event.args[event.path_arg_index as usize];
+    if ptr == 0 {
+        return false;
+    }
+
+    use std::io::{Read, Seek, SeekFrom};
+    let mem_path = format!("/proc/{}/mem", event.pid);
+    let mut f = match std::fs::File::open(&mem_path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    if f.seek(SeekFrom::Start(ptr)).is_err() {
+        return false;
+    }
+    // Read up to MAX_PATH_LEN bytes; stop at NUL
+    let mut buf = [0u8; scmm_common::MAX_PATH_LEN];
+    let n = match f.read(&mut buf) {
+        Ok(n) => n,
+        Err(_) => return false,
+    };
+    // Find the NUL terminator
+    let len = buf[..n].iter().position(|&b| b == 0).unwrap_or(n);
+    if len == 0 {
+        return false;
+    }
+    event.path_data[..len].copy_from_slice(&buf[..len]);
+    event.path_str_len = len as u16;
+    true
+}
+
 /// Check if a PID is still running (standalone function to avoid borrow issues)
 /// Uses waitpid with WNOHANG to properly detect exited/zombie processes
 fn check_child_status(pid: u32) -> ChildStatus {
@@ -500,12 +540,21 @@ impl Recorder {
 
             if process_exited {
                 // Process exited — drain remaining events from the ring buffer.
-                // The kernel may still be committing events after the process
-                // exits, so do multiple drain passes with small delays.
-                for drain_pass in 0..5 {
+                // The kernel may still be committing events after the process exits
+                // (events are written asynchronously into the ring buffer).
+                // Drain until we see two consecutive empty passes, with a
+                // short sleep between each, capped at 500ms total.
+                let mut consecutive_empty = 0;
+                let mut total_wait_ms = 0u64;
+                let mut drain_pass = 0;
+                loop {
                     std::thread::sleep(Duration::from_millis(5));
+                    total_wait_ms += 5;
                     let events = Self::collect_events(&mut ring_buf);
-                    if !events.is_empty() {
+                    if events.is_empty() {
+                        consecutive_empty += 1;
+                    } else {
+                        consecutive_empty = 0;
                         debug!(
                             "Post-exit drain pass {}: {} events",
                             drain_pass,
@@ -514,6 +563,10 @@ impl Recorder {
                         for event in events {
                             self.handle_event(&event)?;
                         }
+                    }
+                    drain_pass += 1;
+                    if consecutive_empty >= 2 || total_wait_ms >= 500 {
+                        break;
                     }
                 }
                 break;
@@ -532,10 +585,17 @@ impl Recorder {
                 self.forward_signal_and_wait(root_pid, sig);
 
                 // Drain any events the child emitted in response to the signal.
-                for drain_pass in 0..5 {
+                let mut consecutive_empty = 0;
+                let mut total_wait_ms = 0u64;
+                let mut drain_pass = 0;
+                loop {
                     std::thread::sleep(Duration::from_millis(5));
+                    total_wait_ms += 5;
                     let events = Self::collect_events(&mut ring_buf);
-                    if !events.is_empty() {
+                    if events.is_empty() {
+                        consecutive_empty += 1;
+                    } else {
+                        consecutive_empty = 0;
                         debug!(
                             "Post-signal drain pass {}: {} events",
                             drain_pass,
@@ -544,6 +604,10 @@ impl Recorder {
                         for event in events {
                             self.handle_event(&event)?;
                         }
+                    }
+                    drain_pass += 1;
+                    if consecutive_empty >= 2 || total_wait_ms >= 500 {
+                        break;
                     }
                 }
             }
@@ -611,9 +675,33 @@ impl Recorder {
 
         // Convert to full event and write
         if event.event_type == ring_event_type::SYSCALL_ENTRY {
-            // Store entry for later matching with exit
-            self.pending_entries
-                .insert((event.pid, event.tid, event.syscall_nr), event.clone());
+            // exit_group (231) and exit (60) never produce a sys_exit tracepoint —
+            // the process terminates inside the syscall before the exit tracepoint fires.
+            // Write the event immediately from the entry alone.
+            if event.syscall_nr == 231 || event.syscall_nr == 60 {
+                let full_event = self.build_full_event(event, None);
+                self.writer.write_event(&full_event)?;
+                self.event_count += 1;
+            } else {
+                // Store entry for later matching with exit.
+                // If the eBPF path read failed (path_str_len == 0 but path_arg_index is set),
+                // attempt to recover the path via /proc/<pid>/mem while the process is
+                // still alive. This handles the case where the path string is in a lazy-loaded
+                // .rodata page that wasn't faulted in when the eBPF tracepoint fired.
+                let mut entry = event.clone();
+                if entry.path_arg_index != 255
+                    && entry.path_str_len == 0
+                    && try_read_path_from_proc_mem(&mut entry)
+                {
+                    trace!(
+                        "Recovered path via /proc/mem for pid={} syscall={}",
+                        entry.pid,
+                        entry.syscall_nr
+                    );
+                }
+                self.pending_entries
+                    .insert((event.pid, event.tid, event.syscall_nr), entry);
+            }
         } else if event.event_type == ring_event_type::SYSCALL_EXIT {
             // Try to match with entry
             let key = (event.pid, event.tid, event.syscall_nr);
