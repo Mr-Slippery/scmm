@@ -1,164 +1,125 @@
 #!/usr/bin/env bash
-# Test: record nc server (bind) and nc client (connect) with strace,
-#       extract policies, compile, enforce both sides, verify communication.
-#       Also verifies that Landlock blocks connecting to a disallowed port.
-set -euo pipefail
+set -euxo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-ROOT="$SCRIPT_DIR/.."
-WORKDIR="$SCRIPT_DIR/out_network"
-PORT=31337
-BLOCKED_PORT=31338
+SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+O_DIR="${SCRIPT_DIR}/out_network_strace"
 
-cleanup() {
-    kill "$SERVER_STRACE_PID" 2>/dev/null || true
-    kill "$SERVER_ENFORCE_PID" 2>/dev/null || true
-    wait "$SERVER_STRACE_PID" 2>/dev/null || true
-    wait "$SERVER_ENFORCE_PID" 2>/dev/null || true
-}
-# Variables referenced in cleanup; initialize to empty so cleanup doesn't error
-SERVER_STRACE_PID=""
-SERVER_ENFORCE_PID=""
-trap cleanup EXIT
+mkdir -p "${O_DIR}"
+S_LOG="${O_DIR}/server.log"
+S_YML="${O_DIR}/server.yaml"
+S_POL="${O_DIR}/server.pol"
+C_LOG="${O_DIR}/client.log"
+C_YML="${O_DIR}/client.yaml"
+C_POL="${O_DIR}/client.pol"
+S_RECEIVED="${O_DIR}/enforce_server_received.txt"
+S_ERROR="${O_DIR}/enforce_server_error.txt"
+C_RECEIVED="${O_DIR}/enforce_client_received.txt"
+C_ERROR="${O_DIR}/enforce_client_error.txt"
+FROM_SERVER="from_server"
+FROM_CLIENT="from_client"
+S_CMD="nc -l 127.0.0.1 31337"
+C_CMD="nc 127.0.0.1 31337"
 
-echo "=== test_network ==="
+ROOT="${SCRIPT_DIR}/../"
 
 if ! command -v nc >/dev/null 2>&1; then
-    echo "SKIP: test_network — nc not installed"
+    echo "SKIP: test_network_strace — nc not installed"
     exit 0
 fi
 if ! command -v strace >/dev/null 2>&1; then
-    echo "SKIP: test_network — strace not installed"
+    echo "SKIP: test_network_strace — strace not installed"
     exit 0
 fi
 
-rm -rf "$WORKDIR"
-mkdir -p "$WORKDIR"
+echo "${FROM_SERVER}" | strace -f -o "${S_LOG}" -s 1500 -- ${S_CMD} &
+SR_PID=$!
+sleep 1
+echo "${FROM_CLIENT}" | strace -f -o "${C_LOG}" -s 1500 -- ${C_CMD} &
+CR_PID=$!
+sleep 1
+S_PID=$(pgrep -f "^${S_CMD}")
+C_PID=$(pgrep -f "^${C_CMD}")
+ps -ef | grep nc | grep 127.0.0.1
+sleep 2
 
-# ── Step 1: Record nc server (bind on PORT) ────────────────────────────────
-# nc -l listens and exits after one connection.  We connect to it immediately
-# to trigger the accept and let nc exit cleanly so strace finishes.
+set +e
+kill -TERM "${C_PID}" "${S_PID}"
+wait "${CR_PID}" "${SR_PID}"
+set -e
 
-strace -f -o "$WORKDIR/server.log" -s 1500 -- \
-    nc -l 127.0.0.1 "$PORT" >/dev/null &
-SERVER_STRACE_PID=$!
+"${ROOT}"target/release/scmm-extract -i "${S_LOG}" -o "${S_YML}" --non-interactive
+"${ROOT}"target/release/scmm-compile -i "${S_YML}" -o "${S_POL}"
+"${ROOT}"target/release/scmm-extract -i "${C_LOG}" -o "${C_YML}" --non-interactive
+"${ROOT}"target/release/scmm-compile -i "${C_YML}" -o "${C_POL}"
 
-# Wait for the port to be open
-for _ in $(seq 1 50); do
-    if nc -z 127.0.0.1 "$PORT" 2>/dev/null; then
-        break
-    fi
-    sleep 0.1
-done
+echo "${FROM_SERVER}" | "${ROOT}"target/release/scmm-enforce -p "${S_POL}" -- \
+    ${S_CMD} > "${S_RECEIVED}" 2> "${S_ERROR}" &
+SE_PID=$!
+sleep 1
+echo "${FROM_CLIENT}" | "${ROOT}"target/release/scmm-enforce -p "${C_POL}" -- \
+    ${C_CMD} > "${C_RECEIVED}" 2> "${C_ERROR}" &
+CE_PID=$!
+sleep 1
 
-# Connect once so the server exits, then wait for strace to finish
-echo "hello" | nc 127.0.0.1 "$PORT" >/dev/null 2>&1 || true
-wait "$SERVER_STRACE_PID" 2>/dev/null || true
-SERVER_STRACE_PID=""
+S_PID=$(pgrep -f "^${S_CMD}")
+C_PID=$(pgrep -f "^${C_CMD}")
 
-# ── Step 2: Record nc client (connect to PORT) ────────────────────────────
-# Start a throwaway listener (without strace) and record only the client side.
+set +e
+kill -TERM "${C_PID}" "${S_PID}"
+wait "${CE_PID}" "${SE_PID}"
+set -e
 
-nc -l 127.0.0.1 "$PORT" >/dev/null &
-LISTENER_PID=$!
+grep "${FROM_CLIENT}" "${S_RECEIVED}"
+grep "${FROM_SERVER}" "${C_RECEIVED}"
 
-for _ in $(seq 1 50); do
-    if nc -z 127.0.0.1 "$PORT" 2>/dev/null; then
-        break
-    fi
-    sleep 0.1
-done
+WRONG_PORT_S_CMD="${S_CMD/31337/31338}"
+WRONG_PORT_C_CMD="${C_CMD/31337/31338}"
 
-strace -f -o "$WORKDIR/client.log" -s 1500 -- \
-    sh -c "echo world | nc 127.0.0.1 $PORT" >/dev/null 2>&1 || true
+echo "${FROM_SERVER}" | "${WRONG_PORT_S_CMD}" > "${S_RECEIVED}" 2> "${S_ERROR}" &
+S_PID=$!
+sleep 1
+echo "${FROM_CLIENT}" | "${ROOT}"target/release/scmm-enforce -p "${C_POL}" -- \
+    ${WRONG_PORT_C_CMD} > "${C_RECEIVED}" 2> "${C_ERROR}" &
+CE_PID=$!
+sleep 1
 
-wait "$LISTENER_PID" 2>/dev/null || true
+set +e
+C_PID=$(pgrep -f "^${WRONG_PORT_C_CMD}")
+set -e
 
-# ── Step 3: Extract + compile server policy ───────────────────────────────
-"$ROOT/target/release/scmm-extract" \
-    -i "$WORKDIR/server.log" -o "$WORKDIR/server.yaml" \
-    --non-interactive --missing-files skip >/dev/null 2>&1
-
-# Verify inbound rule was extracted for PORT
-if ! grep -q "inbound" "$WORKDIR/server.yaml"; then
-    echo "FAIL: test_network — server policy missing inbound network rules"
-    exit 1
-fi
-if ! grep -q "$PORT" "$WORKDIR/server.yaml"; then
-    echo "FAIL: test_network — server policy missing port $PORT"
-    exit 1
-fi
-
-"$ROOT/target/release/scmm-compile" \
-    -i "$WORKDIR/server.yaml" -o "$WORKDIR/server.pol" >/dev/null 2>&1
-
-# ── Step 4: Extract + compile client policy ───────────────────────────────
-"$ROOT/target/release/scmm-extract" \
-    -i "$WORKDIR/client.log" -o "$WORKDIR/client.yaml" \
-    --non-interactive --missing-files skip >/dev/null 2>&1
-
-# Verify outbound rule was extracted for PORT
-if ! grep -q "outbound" "$WORKDIR/client.yaml"; then
-    echo "FAIL: test_network — client policy missing outbound network rules"
-    exit 1
-fi
-if ! grep -q "$PORT" "$WORKDIR/client.yaml"; then
-    echo "FAIL: test_network — client policy missing port $PORT"
-    exit 1
+if [ -n "${C_PID}" ]; then
+  echo "Client should have died because of forbidden port."
+  exit 1
 fi
 
-"$ROOT/target/release/scmm-compile" \
-    -i "$WORKDIR/client.yaml" -o "$WORKDIR/client.pol" >/dev/null 2>&1
+! grep "${FROM_SERVER}" "${C_RECEIVED}"
 
-# ── Step 5: Enforce — start server under policy ───────────────────────────
-"$ROOT/target/release/scmm-enforce" -p "$WORKDIR/server.pol" -- \
-    nc -l 127.0.0.1 "$PORT" >/dev/null &
-SERVER_ENFORCE_PID=$!
+set +e
+kill -TERM "${S_PID}"
+wait "${S_PID}" "${CE_PID}"
+set -e
 
-for _ in $(seq 1 50); do
-    if nc -z 127.0.0.1 "$PORT" 2>/dev/null; then
-        break
-    fi
-    sleep 0.1
-done
+echo "${FROM_SERVER}" | "${ROOT}"target/release/scmm-enforce -p "${S_POL}" -- \
+    ${WRONG_PORT_S_CMD} > "${S_RECEIVED}" 2> "${S_ERROR}" &
+SE_PID=$!
+sleep 1
 
-# ── Step 6: Enforce — client connects using policy ────────────────────────
-RESULT=$("$ROOT/target/release/scmm-enforce" -p "$WORKDIR/client.pol" -- \
-    sh -c "echo ping | nc 127.0.0.1 $PORT" 2>/dev/null) || true
+echo "${FROM_CLIENT}" | ${WRONG_PORT_C_CMD} &
+C_PID=$!
+sleep 1
 
-wait "$SERVER_ENFORCE_PID" 2>/dev/null || true
-SERVER_ENFORCE_PID=""
+set +e
+S_PID=$(pgrep -f "^${WRONG_PORT_S_CMD}")
+set -e
 
-# ── Step 7: Verify communication succeeded ────────────────────────────────
-# The server received "ping" from the client — it just needs to have exited 0
-# (nc exits after the client disconnects). We can't easily capture server
-# output here, so we just verify the enforce commands didn't crash.
-# If the server exited non-zero it means nc's bind() was blocked.
-if ! wait "$SERVER_ENFORCE_PID" 2>/dev/null; then
-    # Already waited above; ignore
-    true
+if [ -n "${S_PID}" ]; then
+  echo "Server should have died because of forbidden port."
+  exit 1
 fi
 
-# ── Step 8: Negative test — client policy blocks connecting to wrong port ─
-# Start a real listener on BLOCKED_PORT so nc doesn't fail for other reasons.
-nc -l 127.0.0.1 "$BLOCKED_PORT" >/dev/null &
-BLOCKED_LISTENER_PID=$!
+! grep "${FROM_CLIENT}" "${S_RECEIVED}"
 
-for _ in $(seq 1 50); do
-    if nc -z 127.0.0.1 "$BLOCKED_PORT" 2>/dev/null; then
-        break
-    fi
-    sleep 0.1
-done
-
-if "$ROOT/target/release/scmm-enforce" -p "$WORKDIR/client.pol" -- \
-    sh -c "echo nope | nc 127.0.0.1 $BLOCKED_PORT" >/dev/null 2>&1; then
-    # If this succeeds it means Landlock didn't block the connect
-    kill "$BLOCKED_LISTENER_PID" 2>/dev/null || true
-    echo "FAIL: test_network — client policy allowed connection to blocked port $BLOCKED_PORT"
-    exit 1
-fi
-kill "$BLOCKED_LISTENER_PID" 2>/dev/null || true
-wait "$BLOCKED_LISTENER_PID" 2>/dev/null || true
-
-echo "PASS: test_network"
+set +e
+kill -TERM "${C_PID}"
+wait "${C_PID}" "${SE_PID}"
+set -e
