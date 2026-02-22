@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -401,8 +401,50 @@ impl Recorder {
         Ok(())
     }
 
+    /// Forward a signal to the child or attached process and wait for it to exit.
+    ///
+    /// In spawn mode (we own the child) we send the signal and then spin on
+    /// `waitpid(WNOHANG)` for up to ~2 s giving the child time to handle it.
+    /// In attach mode we send the signal but don't wait (we don't own the process).
+    fn forward_signal_and_wait(&self, root_pid: u32, sig: i32) {
+        use nix::sys::signal::Signal;
+        use nix::sys::wait::{waitpid, WaitPidFlag};
+
+        let nix_pid = nix::unistd::Pid::from_raw(root_pid as i32);
+        if let Ok(signal) = Signal::try_from(sig) {
+            if let Err(e) = nix::sys::signal::kill(nix_pid, signal) {
+                // ESRCH means the process is already gone — that's fine.
+                if e != nix::errno::Errno::ESRCH {
+                    warn!(
+                        "Failed to forward signal {} to PID {}: {}",
+                        sig, root_pid, e
+                    );
+                }
+            } else {
+                info!("Forwarded signal {} to PID {}", sig, root_pid);
+            }
+        }
+
+        // In spawn mode, wait up to ~2 s for the child to exit so we can
+        // reap it and collect any remaining eBPF events it emitted.
+        if self.child_pid.is_some() {
+            for _ in 0..40 {
+                std::thread::sleep(Duration::from_millis(50));
+                match waitpid(nix_pid, Some(WaitPidFlag::WNOHANG)) {
+                    Ok(nix::sys::wait::WaitStatus::StillAlive) => {}
+                    _ => break, // exited, signalled, or error — done
+                }
+            }
+        }
+    }
+
     /// Main event processing loop
-    pub fn run(&mut self, running: Arc<AtomicBool>, root_pid: u32) -> Result<()> {
+    pub fn run(
+        &mut self,
+        running: Arc<AtomicBool>,
+        signal_num: Arc<AtomicI32>,
+        root_pid: u32,
+    ) -> Result<()> {
         info!("Starting event collection loop");
 
         // Take the ring buffer map out of bpf so we own it - this avoids
@@ -479,6 +521,32 @@ impl Recorder {
 
             // Small sleep to avoid busy-waiting
             std::thread::sleep(Duration::from_millis(1));
+        }
+
+        // If the loop exited because we received a signal (running=false) rather
+        // than because the child exited naturally, forward the signal to the child
+        // and wait for it so we capture any final events it emits.
+        if !running.load(Ordering::SeqCst) {
+            let sig = signal_num.load(Ordering::SeqCst);
+            if sig != 0 {
+                self.forward_signal_and_wait(root_pid, sig);
+
+                // Drain any events the child emitted in response to the signal.
+                for drain_pass in 0..5 {
+                    std::thread::sleep(Duration::from_millis(5));
+                    let events = Self::collect_events(&mut ring_buf);
+                    if !events.is_empty() {
+                        debug!(
+                            "Post-signal drain pass {}: {} events",
+                            drain_pass,
+                            events.len()
+                        );
+                        for event in events {
+                            self.handle_event(&event)?;
+                        }
+                    }
+                }
+            }
         }
 
         // Final drain of remaining events

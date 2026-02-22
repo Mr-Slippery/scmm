@@ -11,8 +11,9 @@
 
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Arc;
+use std::thread;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -121,18 +122,34 @@ fn main() -> ExitCode {
 
     scmm_common::init_tracing(args.verbose);
 
-    // Set up signal handler for graceful shutdown
+    // Set up signal handlers for graceful shutdown.
+    // We intercept SIGINT, SIGTERM, SIGHUP, and SIGQUIT so we can:
+    //   1. Forward the signal to the child process being recorded.
+    //   2. Flush the capture file cleanly.
+    //   3. Re-raise the signal on ourselves so the shell sees the correct
+    //      "killed by signal" exit status.
     let running = Arc::new(AtomicBool::new(true));
-    let r = running.clone();
+    let signal_num = Arc::new(AtomicI32::new(0));
 
-    ctrlc::set_handler(move || {
-        info!("Received interrupt signal, stopping...");
-        r.store(false, Ordering::SeqCst);
-    })
-    .expect("Error setting Ctrl-C handler");
+    {
+        use signal_hook::consts::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
+        let mut signals = signal_hook::iterator::Signals::new([SIGINT, SIGTERM, SIGHUP, SIGQUIT])
+            .expect("Error setting signal handlers");
+        let r = running.clone();
+        let s = signal_num.clone();
+        thread::spawn(move || {
+            // Block until the first signal arrives; store the signal number
+            // and clear the running flag so the main loop can react.
+            if let Some(sig) = signals.into_iter().next() {
+                info!("Received signal {}, stopping...", sig);
+                s.store(sig, Ordering::SeqCst);
+                r.store(false, Ordering::SeqCst);
+            }
+        });
+    }
 
     // Run the recorder
-    match run(args, running) {
+    match run(args, running, signal_num) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("Error: {:#}", e);
@@ -178,7 +195,7 @@ fn resolve_sudo_user() -> Option<(u32, u32)> {
     Some((uid, gid))
 }
 
-fn run(args: Args, running: Arc<AtomicBool>) -> Result<()> {
+fn run(args: Args, running: Arc<AtomicBool>, signal_num: Arc<AtomicI32>) -> Result<()> {
     // Validate: exactly one of --pid or command must be provided
     let attach_pid = args.pid;
     let has_command = !args.command.is_empty();
@@ -271,11 +288,25 @@ fn run(args: Args, running: Arc<AtomicBool>) -> Result<()> {
     };
 
     // Event processing loop
-    recorder.run(running, root_pid)?;
+    recorder.run(running, signal_num.clone(), root_pid)?;
 
     // Finalize capture file
     recorder.finalize()?;
 
     info!("Recording complete");
+
+    // Re-raise the signal on ourselves so the shell sees "killed by signal X"
+    // rather than a plain exit code. This mirrors the standard behaviour of
+    // programs that catch a signal, do cleanup, and then die from it.
+    let sig = signal_num.load(Ordering::SeqCst);
+    if sig != 0 {
+        use nix::sys::signal::{self, SigHandler, Signal};
+        if let Ok(signal) = Signal::try_from(sig) {
+            // Reset to the default handler so the raise actually terminates us.
+            let _ = unsafe { signal::signal(signal, SigHandler::SigDfl) };
+            let _ = signal::raise(signal);
+        }
+    }
+
     Ok(())
 }

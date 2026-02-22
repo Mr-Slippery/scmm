@@ -16,7 +16,7 @@ serde.workspace = true
 libc = "0.2"
 caps = "0.5.6"
 nix = { version = "0.28", features = ["process", "signal", "user"] }
-ctrlc = "3.4"
+signal-hook = "0.3"
 gethostname = "0.4"
 serde_json = "1.0"
 
